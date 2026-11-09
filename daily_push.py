@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 
-import app  # 复用 web 应用里的全部选股逻辑（裸运行模式下 UI 部分不生效）
+import app  # 复用 web 应用的选股逻辑；裸运行无 ScriptRunContext，一律调 *_impl 版本（绕开 st.cache_data）
 
 CAPITAL = float(os.environ.get("CAPITAL", "2200"))     # 本金，可用环境变量覆盖
 TO_ADDR = os.environ["QQ_EMAIL"]                        # 收件邮箱（与发件邮箱相同）
@@ -22,7 +22,7 @@ LOG_FILE = Path(__file__).parent / "推送记录.csv"       # 推送留档，供
 
 def build_email() -> str:
     """跑一遍完整选股流程，生成邮件正文"""
-    idx_close, idx_ma60, cold = app.market_temperature()
+    idx_close, idx_ma60, cold = app.market_temperature_impl()
     tag = "【低温期】" if cold else "【回暖期】"
     lines = [f"大盘标签 {tag}：沪深300 收盘 {idx_close:.0f}，60日均线 {idx_ma60:.0f}", ""]
 
@@ -30,14 +30,13 @@ def build_email() -> str:
         lines.append("大盘处于低温期（系统性下跌段），今日建议空仓，以下仅为数据参考，不建议买入。")
         lines.append("")
 
-    spot = app.get_spot()
-    cand = app.screen(spot)
+    cand = app.screen_impl()                   # 初筛（内部经 get_spot_impl 拉全市场行情）
     if len(cand) == 0:
         lines.append("今日初筛无符合条件的股票，空仓等待。")
         return "\n".join(lines)
 
-    cand = cand.nlargest(app.TOP_N, "成交额")             # 与web一致的候选策略
-    res = app.verify(cand)
+    cand = cand.nlargest(app.CANDIDATES, "成交额")        # 与web一致的候选策略
+    res = app.verify_impl(cand, lambda p, t: None)        # 无界面，进度回调置空
     if len(res) == 0:
         lines.append("候选股历史数据不足，今日不建议买入。")
         return "\n".join(lines)
@@ -55,19 +54,19 @@ def build_email() -> str:
         return "\n".join(lines)
 
     plan, left = app.allocate(picks, CAPITAL)
-    lines.append(f"今日推荐：本金 {CAPITAL:.0f} 元，计划投入 {plan['总花费'].sum():.0f} 元，剩余 {left:.0f} 元")
+    lines.append(f"今日推荐：本金 {CAPITAL:.0f} 元，计划投入 {plan['投入(含佣金)'].sum():.0f} 元，剩余 {left:.0f} 元")
     lines.append("")
     for _, p in plan.iterrows():
         lines.append(
             f"{p['名称']}（{p['代码']}）现价 {p['现价']:.2f} 元 | "
-            f"买入 {int(p['股数'])} 股 约 {p['总花费']:.0f} 元 | "
-            f"盈利概率 {p['盈利概率'] * 100:.0f}% | "
-            f"止损 {p['止损价']:.2f} 元 | 止盈参考 {p['止盈参考']:.2f} 元"
+            f"买入 {int(p['买入股数'])} 股 约 {p['投入(含佣金)']:.0f} 元 | "
+            f"盈利概率 {p['盈利概率']:.0f}% | "
+            f"止损 {p['止损价(跌破必卖)']:.2f} 元 | 止盈参考 {p['止盈参考(到价考虑卖)']:.2f} 元"
         )
     lines += ["", "纪律：跌破止损价无条件卖出；持有超20个交易日不涨也卖。",
               "（本邮件为量化程序自动生成，仅为历史数据推演，不构成投资建议）"]
     # 留档供周末复盘
-    rec = plan[["代码", "名称", "现价", "股数"]].copy()
+    rec = plan[["代码", "名称", "现价", "买入股数"]].copy()
     rec.insert(0, "日期", pd.Timestamp.now().strftime("%Y-%m-%d"))
     rec["大盘标签"] = tag
     rec.to_csv(LOG_FILE, mode="a", header=not LOG_FILE.exists(),
@@ -77,7 +76,7 @@ def build_email() -> str:
 
 def send(body: str):
     """通过QQ邮箱SMTP发送（授权码从GitHub Secrets注入，不落盘）"""
-    _, _, cold = app.market_temperature()
+    _, _, cold = app.market_temperature_impl()
     tag = "低温期" if cold else "回暖期"
     msg = MIMEText(body, "plain", "utf-8")
     msg["From"] = TO_ADDR

@@ -1,0 +1,3 @@
+[browser]
+# 关闭使用统计上报，避免在用户目录写文件及外发请求
+gatherUsageStats = false

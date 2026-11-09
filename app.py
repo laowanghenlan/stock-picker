@@ -12,7 +12,8 @@ import akshare as ak
 import pandas as pd
 import streamlit as st
 
-from data import get_history, get_spot, refresh_spot, spot_cache_time
+from data import (get_history, get_history_impl, get_spot, get_spot_impl,
+                  refresh_spot, spot_cache_time)
 from strategy import backtest, generate_signals
 
 # 利空关键词：近7天新闻标题命中任一即视为"有雷"，直接排除
@@ -20,9 +21,9 @@ NEG_KEYWORDS = ("减持", "立案", "退市", "处罚", "问询", "警示", "冻
                 "违规", "诉讼", "仲裁", "预亏", "暴雷", "停牌", "质押", "担保逾期")
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def news_risk(code: str) -> list:
-    """拉取该股最近新闻标题，返回近7天内命中利空关键词的标题列表。空列表=无雷。"""
+def news_risk_impl(code: str) -> list:
+    """拉取该股最近新闻标题，返回近7天内命中利空关键词的标题列表。空列表=无雷。
+    （无缓存装饰器，供裸运行脚本直接调用）"""
     try:
         news = ak.stock_news_em(symbol=code)
     except Exception:
@@ -44,8 +45,11 @@ def news_risk(code: str) -> list:
     return hits
 
 
-@st.cache_data(ttl=3600, show_spinner="正在检查大盘温度...")
-def market_temperature() -> tuple:
+# 缓存包装：web UI 一律调 news_risk；GitHub Actions 等裸运行环境请调 news_risk_impl
+news_risk = st.cache_data(ttl=3600, show_spinner=False)(news_risk_impl)
+
+
+def market_temperature_impl() -> tuple:
     """大盘温度：沪深300最新收盘 vs 60日均线。
     返回 (最新收盘, MA60, 是否低温期)。低温期=收盘在MA60下方，系统性下跌段，应空仓。"""
     try:
@@ -60,14 +64,22 @@ def market_temperature() -> tuple:
         return 0.0, 0.0, False                     # 接口失败时不阻塞选股
 
 
-@st.cache_data(ttl=43200, show_spinner=False)
-def lhb_codes() -> set:
-    """近一月上过龙虎榜的股票代码集合（游资爆炒区，小资金回避）。接口失败返回空集。"""
+# 缓存包装：web UI 一律调 market_temperature；裸运行环境请调 market_temperature_impl
+market_temperature = st.cache_data(ttl=3600, show_spinner="正在检查大盘温度...")(market_temperature_impl)
+
+
+def lhb_codes_impl() -> set:
+    """近一月上过龙虎榜的股票代码集合（游资爆炒区，小资金回避）。接口失败返回空集。
+    （无缓存装饰器，供裸运行脚本直接调用）"""
     try:
         lhb = ak.stock_lhb_stock_statistic_em(symbol="近一月")
         return set(lhb["代码"].astype(str).str.zfill(6))
     except Exception:
         return set()
+
+
+# 缓存包装：web UI 一律调 lhb_codes；GitHub Actions 等裸运行环境请调 lhb_codes_impl
+lhb_codes = st.cache_data(ttl=43200, show_spinner=False)(lhb_codes_impl)
 
 
 HOLDINGS_FILE = Path(__file__).parent / "持仓.csv"
@@ -105,7 +117,7 @@ def check_holdings(hd: pd.DataFrame, spot: pd.DataFrame) -> pd.DataFrame:
             act = "🔴 止损卖出"
         elif now >= cost * (1 + TAKE_PROFIT_PCT):
             act = "🟢 到止盈，考虑卖"
-        elif news_risk(code):
+        elif news_risk_impl(code):               # 内部调用走 _impl，避免嵌套缓存
             act = "⚠️ 有利空新闻，检查"
         else:
             act = "✅ 继续持有"
@@ -164,12 +176,13 @@ def _board_ok(code: str) -> bool:
     return not code.startswith(("300", "301", "688", "8", "4", "920"))
 
 
-def screen() -> pd.DataFrame:
-    """第一步：从全市场快照里做硬性初筛，只留下安全、买得起、流动性够的股票"""
-    df = get_spot()
+def screen_impl() -> pd.DataFrame:
+    """第一步：从全市场快照里做硬性初筛，只留下安全、买得起、流动性够的股票。
+    （无缓存装饰器，供裸运行脚本直接调用）"""
+    df = get_spot_impl()                                 # 内部调用走 _impl，避免嵌套缓存
     df = df.copy()
     df["代码"] = df["代码"].astype(str).str.zfill(6)
-    lhb = lhb_codes()                                    # 龙虎榜名单（近一月）
+    lhb = lhb_codes_impl()                               # 龙虎榜名单（近一月）
     name = df["名称"].astype(str)
     mask = (
         df["代码"].map(_board_ok)
@@ -183,6 +196,10 @@ def screen() -> pd.DataFrame:
         & df["量比"].between(0.5, 10)                     # 量能正常，剔除异常放量庄股
     )
     return df[mask]
+
+
+# web UI 沿用原名 screen；GitHub Actions 等裸运行环境请调 screen_impl
+screen = screen_impl
 
 
 def _trade_stats(sig: pd.DataFrame) -> tuple[float, float]:
@@ -204,10 +221,11 @@ def _trade_stats(sig: pd.DataFrame) -> tuple[float, float]:
     return avg_win, avg_loss
 
 
-def verify(cands: pd.DataFrame, progress) -> pd.DataFrame:
+def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
     """第二步：对初筛候选逐只跑 MA5/20 金叉策略回测。
     回测已含：佣金万2.5(最低5元)+印花税+滑点、冷却期20天、最短持有5天。
-    用扣费后的真实收益打分，赚不回手续费的股票直接被淘汰。"""
+    用扣费后的真实收益打分，赚不回手续费的股票直接被淘汰。
+    （无缓存装饰器，供裸运行脚本直接调用；progress 为进度回调，可传 lambda p, t: None）"""
     end_d = dt.date.today()
     start_d = end_d - dt.timedelta(days=HISTORY_DAYS)
     rows = []
@@ -215,7 +233,7 @@ def verify(cands: pd.DataFrame, progress) -> pd.DataFrame:
     for i, (_, r) in enumerate(cands.iterrows()):
         code = r["代码"]
         try:
-            h = get_history(code, start_d.strftime("%Y%m%d"), end_d.strftime("%Y%m%d"))
+            h = get_history_impl(code, start_d.strftime("%Y%m%d"), end_d.strftime("%Y%m%d"))
             if h is None or len(h) < 120:
                 continue
             sig = generate_signals(h, "ma_cross", {"fast": 5, "slow": 20},
@@ -223,7 +241,7 @@ def verify(cands: pd.DataFrame, progress) -> pd.DataFrame:
             _, _, bs = backtest(sig, initial_cash=float(capital))
             fee = float(bs["累计手续费"].rstrip("元"))
             avg_win, avg_loss = _trade_stats(sig)
-            risk_hits = news_risk(code)          # 舆情排雷：近7天利空新闻
+            risk_hits = news_risk_impl(code)     # 舆情排雷：近7天利空新闻（内部调用走 _impl，避免嵌套缓存）
             last = sig.iloc[-1]
             # 技术面硬条件：当前价在20日线上，且5日线在20日线上（趋势仍向上）
             # _fast/_slow 是信号表里的 MA5/MA20 列
@@ -243,6 +261,10 @@ def verify(cands: pd.DataFrame, progress) -> pd.DataFrame:
             continue                                    # 单只失败不影响整体
         progress((i + 1) / total, f"回测验证中 {i + 1}/{total}：{r['名称']}")
     return pd.DataFrame(rows)
+
+
+# web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
+verify = verify_impl
 
 
 def pick_top3(res: pd.DataFrame) -> pd.DataFrame:
