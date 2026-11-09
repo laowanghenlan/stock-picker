@@ -7,6 +7,9 @@ on:
     - cron: '30 22 * * 0-4'      # UTC 周日~周四 22:30 = 北京 周一~周五 6:30
   workflow_dispatch:              # 允许在 Actions 页面手动点 Run 测试
 
+permissions:
+  contents: write                 # 允许工作流把推送记录回传仓库（新仓库默认只读，必须显式声明）
+
 jobs:
   push:
     runs-on: ubuntu-latest
