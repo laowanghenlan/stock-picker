@@ -407,6 +407,9 @@ def _trade_stats(sig: pd.DataFrame) -> tuple[float, float]:
     return avg_win, avg_loss
 
 
+import factors  # L1 多因子层：动量/波动率/换手 + IC检验（无效因子自动弃用）
+
+
 def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
     """第二步：对初筛候选逐只跑 MA5/20 金叉策略回测。
     回测已含：佣金万2.5(最低5元)+印花税+滑点、冷却期20天、最短持有5天。
@@ -414,7 +417,7 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
     （无缓存装饰器，供裸运行脚本直接调用；progress 为进度回调，可传 lambda p, t: None）"""
     end_d = dt.date.today()
     start_d = end_d - dt.timedelta(days=HISTORY_DAYS)
-    rows = []
+    rows, obs = [], []                     # obs：因子IC检验的滚动采样观测
     total = len(cands)
     for i, (_, r) in enumerate(cands.iterrows()):
         code = r["代码"]
@@ -422,6 +425,8 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
             h = get_history_impl(code, start_d.strftime("%Y%m%d"), end_d.strftime("%Y%m%d"))
             if h is None or len(h) < 120:
                 continue
+            fv = factors.latest_factors(h)              # 最新截面因子值
+            obs.extend(factors.collect_obs(code, h))    # 历史滚动采样（供IC检验）
             sig = generate_signals(h, "ma_cross", {"fast": 5, "slow": 20},
                                    cooldown=20, min_hold_days=5)
             _, _, bs = backtest(sig, initial_cash=float(capital))
@@ -440,13 +445,19 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
                 "最大回撤": float(bs["最大回撤"].rstrip("%")),
                 "交易次数": int(bs["交易次数"]), "手续费": fee,
                 "平均盈利率": avg_win, "平均亏损率": avg_loss,
+                "动量20": fv["动量20"], "波动率20": fv["波动率20"], "换手20": fv["换手20"],
                 "趋势向上": trend_ok,
                 "有雷": len(risk_hits) > 0, "利空标题": "；".join(risk_hits[:2]),
             })
         except Exception:
             continue                                    # 单只失败不影响整体
         progress((i + 1) / total, f"回测验证中 {i + 1}/{total}：{r['名称']}")
-    return pd.DataFrame(rows)
+    res = pd.DataFrame(rows)
+    # 因子IC检验（pooled，截面秩相关）：权重随结果走，供 pick_top3 使用
+    ic = factors.pooled_ic(pd.DataFrame(obs))
+    res.attrs["ic"] = ic
+    res.attrs["ic_weights"] = factors.ic_weights(ic)
+    return res
 
 
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
@@ -462,6 +473,11 @@ def pick_top3(res: pd.DataFrame, n: int = PICKS) -> pd.DataFrame:
     res["胜率分"] = res["胜率"].rank(pct=True) * 100
     res["趋势分"] = res["趋势向上"].map({True: 100.0, False: 0.0})
     res["总分"] = res["收益分"] * 0.5 + res["胜率分"] * 0.2 + res["趋势分"] * 0.3
+    # L1 多因子层：权重来自IC检验（无效因子已被剔除）；无有效因子时保持原评分不变
+    icw = res.attrs.get("ic_weights") or {}
+    if icw:
+        fscore = sum(res[c].rank(pct=True).fillna(0.5) * w for c, w in icw.items())
+        res["总分"] = res["总分"] * 0.6 + fscore * 100 * 0.4
     res = res.sort_values("总分", ascending=False)
     # 只保留扣费后还能赚钱、且近7天无利空新闻的股票
     res = res[(res["扣费总收益"] > 0) & (~res["有雷"])]
@@ -584,6 +600,13 @@ if run:
     if len(ranked) == 0:
         st.warning("今天没有股票通过回测+排雷验证。空仓也是一种操作，明天再来。")
         st.stop()
+    # 因子检验结果透明展示：哪些因子有效、权重多少，用户看得见
+    _icv, _icw = res.attrs.get("ic") or {}, res.attrs.get("ic_weights") or {}
+    if _icw:
+        st.caption("🧬 因子IC检验：" + "　".join(
+            f"{k} IC={_icv.get(k, 0):+.3f}→权重{_icw[k]:+.2f}" for k in _icw))
+    else:
+        st.caption("🧬 本期因子IC全部低于0.03有效性门槛，评分已自动退回回测原版。")
 
     plan, n_final = best_plan(ranked, float(capital))
     leftover = float(capital) - float(plan["投入(含佣金)"].sum())
