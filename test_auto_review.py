@@ -4,7 +4,7 @@
 覆盖三种场景（akshare 全部打桩为假数据，不联网）：
   A. 推送记录.csv 不存在  → 安静显示"暂无历史推荐"，无异常
   B. 推送记录.csv 有数据  → 自动复盘板块出现，汇总数字与明细标签逐一核对
-  C. 恢复真实推送记录.csv → 全部为当日推荐，标 ⏳未满5日，不计入胜率
+  C. 恢复真实推送记录.csv → 打桩无后续行情，标 ⏳持有中(当日新推)，不计入胜率
 运行：python test_auto_review.py
 """
 import datetime as dt
@@ -27,11 +27,16 @@ REC_DATE = {"000001": "2026-10-26", "000002": "2026-10-26",
             "000003": "2026-10-27", "000004": "2026-10-27",
             "000005": dt.date.today().strftime("%Y-%m-%d")}
 FAKE_CLOSES = {
-    "000001": [9.40, 9.30, 9.20, 9.10, 9.00],   # 10.00 推荐，第1日触止损-5%，之后继续跌 → 🛑+挽回40元
-    "000002": [5.20, 5.56, 5.40, 5.50, 5.45],   # 5.00 推荐，第2日触止盈+10% → 🎯
-    "000003": [4.04, 4.10, 3.95, 4.12, 4.20],   # 4.00 推荐，5日未触发，收4.20 → 📈持有中盈利
-    "000004": [7.95, 7.90, 7.85, 7.88, 7.80],   # 8.00 推荐，5日未触发，收7.80 → 📉持有中亏损
-    "000005": [],                                # 今日推荐，无后续交易日 → ⏳未满5日
+    # 10.00 推荐，第1日触止损-5%，之后20日横在9.00 → 🛑+挽回(9.40-9.00)*100=40元
+    "000001": [9.40, 9.30, 9.20, 9.10, 9.00] + [9.00] * 15,
+    # 5.00 推荐，第2日触止盈+10% → 🎯
+    "000002": [5.20, 5.56] + [5.45] * 18,
+    # 4.00 推荐，20日未触发（区间3.80~4.40），到期收4.20 → 🏁到期盈利
+    "000003": [4.04, 4.10, 3.95, 4.12] + [4.20] * 16,
+    # 8.00 推荐，20日未触发（区间7.60~8.80），到期收7.80 → 🏁到期亏损
+    "000004": [7.95, 7.90, 7.85, 7.88] + [7.80] * 16,
+    # 今日推荐，无后续交易日 → ⏳持有中(当日新推)
+    "000005": [],
 }
 SHARES = {"000001": 100, "000002": 200, "000003": 100, "000004": 100, "000005": 100}
 PRICE0 = {"000001": 10.00, "000002": 5.00, "000003": 4.00, "000004": 8.00, "000005": 3.00}
@@ -45,7 +50,9 @@ def fake_hist(symbol=None, period=None, start_date=None, end_date=None, adjust=N
 
 
 def fake_index(symbol=None, period=None, start_date=None, end_date=None):
-    return pd.DataFrame({"收盘": [4000.0] * 99 + [4100.0]})   # 收盘>MA60，大盘正常
+    # 带日期列：既供大盘温度（收盘不低于MA60判回暖），也供复盘基准对比（恒定4000 → 基准涨跌为0）
+    days = pd.bdate_range(end=dt.date.today(), periods=120)
+    return pd.DataFrame({"日期": days.strftime("%Y-%m-%d"), "收盘": [4000.0] * 120})
 
 
 def run_app() -> AppTest:
@@ -95,31 +102,33 @@ def scenario_b():
                round((4.20 - 4.00) * 100, 1), round((7.80 - 8.00) * 100, 1)]
     assert metric(at, "推荐总数") == "5 条"
     assert metric(at, "胜率") == "50%（2/4）", metric(at, "胜率")
-    assert metric(at, "平均5日盈亏") == f"{sum(pnls) / len(pnls):+.2f}%"
+    assert metric(at, "平均每笔盈亏") == f"{sum(pnls) / len(pnls):+.2f}%"
     assert metric(at, "累计盈亏") == f"{sum(amounts):+.0f} 元"
 
     tbl = review_table(at)
     assert len(tbl) == 5
     got = set(tbl["结果"])
-    want = {"🎯止盈", "🛑止损保命", "📈持有中盈利", "📉持有中亏损", "⏳未满5日"}
+    want = {"🎯止盈", "🛑止损保命", "🏁到期盈利", "🏁到期亏损", "⏳持有中(当日新推)"}
     assert got == want, f"结果标签不符: {got}"
 
     infos = [i.value for i in at.info]
     assert any("有赚有亏" in t and "止损纪律避免了约 40 元额外亏损" in t for t in infos), \
         f"自动结论不符: {infos}"
+    assert any("同期沪深300平均" in t for t in infos), f"缺少基准对比结论: {infos}"
     print("场景B（5条假推荐）：通过 —— 汇总数字/明细标签/自动结论全部正确")
 
 
 def scenario_c():
-    shutil.copy2(BAK, CSV)                     # 恢复真实推送记录（3条均为今日推荐）
+    shutil.copy2(BAK, CSV)                     # 恢复真实推送记录
+    n_real = len(pd.read_csv(CSV))
     at = run_app()
-    assert metric(at, "推荐总数") == "3 条"
+    assert metric(at, "推荐总数") == f"{n_real} 条"
     assert metric(at, "胜率") == "—"
     infos = [i.value for i in at.info]
-    assert any("推荐都还不满5个交易日" in t for t in infos), f"结论不符: {infos}"
+    assert any("持有期" in t for t in infos), f"结论不符: {infos}"
     tbl = review_table(at)
-    assert set(tbl["结果"]) == {"⏳未满5日"}
-    print("场景C（真实推送记录）：通过 —— 今日推荐标 ⏳未满5日，不计入胜率")
+    assert set(tbl["结果"]) == {"⏳持有中(当日新推)"}
+    print("场景C（真实推送记录）：通过 —— 打桩无后续行情，全部标 ⏳持有中，不计入胜率")
 
 
 if __name__ == "__main__":

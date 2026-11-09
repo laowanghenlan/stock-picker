@@ -1,10 +1,10 @@
-# 周一至周五北京时间 6:30 自动选股并发送QQ邮件
-# GitHub 使用 UTC 时间，北京 6:30 = UTC 前一天 22:30，因此 cron 为周日~周四 22:30
+# 周一至周五北京时间 9:00 自动选股并发送QQ邮件
+# GitHub 使用 UTC 时间，北京 9:00 = UTC 当天 1:00，因此 cron 为周一~周五 1:00
 name: 每日选股推送
 
 on:
   schedule:
-    - cron: '30 22 * * 0-4'      # UTC 周日~周四 22:30 = 北京 周一~周五 6:30
+    - cron: '0 1 * * 1-5'      # UTC 周一~周五 1:00 = 北京 周一~周五 9:00
   workflow_dispatch:              # 允许在 Actions 页面手动点 Run 测试
 
 permissions:

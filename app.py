@@ -1,7 +1,7 @@
 """每日一键选股 · 极简版
 只要点一个按钮，后台自动完成：
 全市场初筛（价格/市值/成交/剔除风险股）→ 逐只历史回测（含手续费+降费过滤器）→
-综合打分（扣费收益+胜率+趋势）→ 输出3只 + 按页面输入本金分摊的买入方案。
+综合打分（扣费收益+胜率+趋势）→ 按本金自动决定只数（本金÷1000）+ 分摊买入方案。
 
 启动方式：streamlit run app.py
 """
@@ -143,9 +143,28 @@ def check_holdings(hd: pd.DataFrame, spot: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 def auto_pick_count(capital: float) -> int:
-    """按本金自动决定推荐只数：单笔不低于700元（佣金最低5元占比约0.7%可接受），
-    最多5只（分散上限），最少1只"""
-    return max(1, min(5, int(capital // 700)))
+    """估算只数（用于股价上限计算）：本金÷1000，最少1只，不设上限。
+    最终只数由 best_plan 按'收益-手续费最大化'自动定。"""
+    return max(1, int(capital // 1000))
+
+
+def best_plan(ranked: pd.DataFrame, capital: float):
+    """只数不写死：枚举 1~min(候选数,20)，选'预期总收益−买卖全部摩擦成本'最大的方案。
+    预期收益 = 各票扣费回测收益% × 实际买入金额；摩擦含最低5元佣金
+    （本金越小固定佣金越吃亏，最优只数自然越少；候选越多收益越高，只数自然越多）。
+    返回 (买入方案, 最优只数)。"""
+    ret_map = ranked.set_index("代码")["预期收益%"]
+    best_df, best_n, best_net = None, 0, -1e18
+    for n in range(1, min(len(ranked), 20) + 1):
+        plan, _left = allocate(ranked.head(n), capital)
+        amt = plan["买入股数"] * plan["现价"]
+        gross = float((amt * plan["代码"].map(ret_map) / 100).sum())
+        buy_fee = float((plan["投入(含佣金)"] - amt).sum())
+        sell_fee = float((5.0 + amt * 0.00051).sum())   # 卖出：最低佣金5元+印花税0.05%+过户费
+        net = gross - buy_fee - sell_fee
+        if net > best_net:
+            best_df, best_n, best_net = plan, n, net
+    return best_df, best_n
 
 
 # ---------------- 固定参数（本金由页面输入，其余固化在后台） ----------------
@@ -159,13 +178,26 @@ HISTORY_DAYS = 500      # 回测用的历史天数
 # ---------------- 历史推荐复盘（打开页面自动执行，无需点击） ----------------
 REVIEW_FILE = Path(__file__).parent / "推送记录.csv"   # GitHub Actions 每日推送留档
 REVIEW_N = 10            # 默认复盘最近10条推荐（低温期可能多天无推荐，不限于7天）
-REVIEW_DAYS = 5          # 推荐后观察5个交易日
+REVIEW_DAYS = 20         # 推荐后最长跟踪20个交易日（与策略持有期一致），触发止盈/止损即出结果
+
+
+def _index_series(start: pd.Timestamp, end: dt.date):
+    """沪深300日线（日期->收盘），供复盘做基准对比；接口失败返回 None，不影响复盘本身。"""
+    try:
+        idx = ak.index_zh_a_hist(symbol="000300", period="daily",
+                                 start_date=(start - dt.timedelta(days=10)).strftime("%Y%m%d"),
+                                 end_date=end.strftime("%Y%m%d"))
+        s = pd.Series(idx["收盘"].astype(float).values, index=pd.to_datetime(idx["日期"]))
+        return s.sort_index()
+    except Exception:
+        return None
 
 
 def review_impl() -> pd.DataFrame:
     """复盘最近 REVIEW_N 条推送记录：
-    按推荐日后 REVIEW_DAYS 个交易日的收盘价，逐日判定是否先触及止盈(+10%)或止损(-5%)；
-    满5日未触发按第5日收盘定盈亏；未满5日标 ⏳，不计入胜率。
+    推荐日后最长跟踪 REVIEW_DAYS 个交易日（与策略持有期一致），逐日判定谁先触发
+    止盈(+10%)/止损(-5%)；满20日未触发按到期收盘定盈亏（🏁）；
+    未满20日且未触发标 ⏳持有中，不计入胜率。同时给出同期沪深300涨跌幅作基准。
     推送记录.csv 不存在或为空时返回空表，安静跳过。
     （无缓存装饰器，供裸运行脚本直接调用）"""
     if not REVIEW_FILE.exists():
@@ -178,6 +210,7 @@ def review_impl() -> pd.DataFrame:
         return pd.DataFrame()
     df = df.dropna(subset=["日期", "代码", "现价"]).tail(REVIEW_N)
     end_d = dt.date.today()
+    idx_s = _index_series(pd.Timestamp(str(df["日期"].min())), end_d)   # 基准指数，只拉一次
     rows = []
     for _, r in df.iterrows():
         try:
@@ -195,36 +228,52 @@ def review_impl() -> pd.DataFrame:
         except Exception:
             h = None
         future = pd.Series(dtype=float)
+        fdates = pd.Series(dtype="datetime64[ns]")
         if h is not None and len(h) > 0:
-            future = (h[pd.to_datetime(h["日期"]) > rec_date]["收盘"]
-                      .astype(float).reset_index(drop=True))
+            fh = h[pd.to_datetime(h["日期"]) > rec_date]
+            future = fh["收盘"].astype(float).reset_index(drop=True)
+            fdates = pd.to_datetime(fh["日期"]).reset_index(drop=True)
         stop_px, take_px = price0 * (1 - STOP_LOSS_PCT), price0 * (1 + TAKE_PROFIT_PCT)
-        label, judge_px = None, None
-        n = min(len(future), REVIEW_DAYS)          # 推荐日后已过去的交易日数（最多算5天）
+        label, judge_px, judge_i = None, None, None
+        n = min(len(future), REVIEW_DAYS)          # 推荐日后已过去的交易日数（最多跟踪20天）
         for i in range(n):                          # 逐日判定，谁先触发算谁
             c = float(future.iloc[i])
             if c >= take_px:
-                label, judge_px = "🎯止盈", c
+                label, judge_px, judge_i = "🎯止盈", c, i
                 break
             if c <= stop_px:
-                label, judge_px = "🛑止损保命", c
+                label, judge_px, judge_i = "🛑止损保命", c, i
                 break
         if label is None:
             if n >= REVIEW_DAYS:
-                judge_px = float(future.iloc[REVIEW_DAYS - 1])
-                label = "📈持有中盈利" if judge_px >= price0 else "📉持有中亏损"
+                judge_i = REVIEW_DAYS - 1
+                judge_px = float(future.iloc[judge_i])
+                label = "🏁到期盈利" if judge_px >= price0 else "🏁到期亏损"
             else:
+                judge_i = n - 1
                 judge_px = float(future.iloc[n - 1]) if n > 0 else price0
-                label = "⏳未满5日"
+                label = f"⏳持有中(第{n}天)" if n > 0 else "⏳持有中(当日新推)"
+        judge_date = (fdates.iloc[judge_i]
+                      if judge_i is not None and judge_i >= 0 else rec_date)
+        # 同期沪深300涨跌幅：推荐日（或之前最近交易日）收盘 -> 判定日收盘
+        bench = None
+        if idx_s is not None:
+            try:
+                b0 = idx_s.loc[:rec_date].iloc[-1]
+                b1 = idx_s.loc[:judge_date].iloc[-1]
+                bench = round((b1 / b0 - 1) * 100, 2)
+            except Exception:
+                bench = None
         row = {"日期": rec_date.strftime("%Y-%m-%d"), "名称": str(r.get("名称", "")).strip(),
                "推荐价": round(price0, 2), "现价": round(judge_px, 2),
                "盈亏%": round((judge_px / price0 - 1) * 100, 2), "结果": label,
+               "同期沪深300%": bench,
                "_盈亏额": round((judge_px - price0) * shares, 1),
-               "_done": label != "⏳未满5日", "_saved": 0.0}
-        # 止损挽回金额：若止损后跌到第5日更低，估算纪律避免了多少额外亏损
+               "_done": not label.startswith("⏳"), "_saved": 0.0}
+        # 止损挽回金额：若止损后继续跌到满期，估算纪律避免了多少额外亏损
         if label == "🛑止损保命" and len(future) >= REVIEW_DAYS:
-            day5 = float(future.iloc[REVIEW_DAYS - 1])
-            row["_saved"] = round(max(0.0, judge_px - day5) * shares, 1)
+            day_end = float(future.iloc[REVIEW_DAYS - 1])
+            row["_saved"] = round(max(0.0, judge_px - day_end) * shares, 1)
         rows.append(row)
     if not rows:
         return pd.DataFrame()
@@ -240,18 +289,25 @@ def review_conclusion(rv: pd.DataFrame) -> str:
     """根据复盘结果自动生成一句大白话结论"""
     done = rv[rv["_done"]]
     if len(done) == 0:
-        return "推荐都还不满5个交易日，暂无胜负结果，耐心等复盘。"
-    wins = int(done["结果"].isin(["🎯止盈", "📈持有中盈利"]).sum())
+        return "推荐都还在20日持有期内，暂无胜负结果，耐心等复盘。"
+    wins = int(done["结果"].isin(["🎯止盈", "🏁到期盈利"]).sum())
     wr = wins / len(done) * 100
     avg = done["盈亏%"].mean()
     if wr >= 60 and avg > 0:
-        text = f"近 {len(done)} 笔已复盘推荐胜率 {wr:.0f}%、平均5日 {avg:+.1f}%，整体赚钱，继续保持纪律。"
+        text = f"近 {len(done)} 笔已出结果推荐胜率 {wr:.0f}%、平均每笔 {avg:+.1f}%，整体赚钱，继续保持纪律。"
     elif wr < 40 or avg < 0:
-        text = (f"近 {len(done)} 笔已复盘推荐胜率 {wr:.0f}%、平均5日 {avg:+.1f}%，整体偏弱，"
+        text = (f"近 {len(done)} 笔已出结果推荐胜率 {wr:.0f}%、平均每笔 {avg:+.1f}%，整体偏弱，"
                 f"建议降低单笔仓位，等大盘回暖再加大投入。")
     else:
-        text = (f"近 {len(done)} 笔已复盘推荐胜率 {wr:.0f}%、平均5日 {avg:+.1f}%，"
+        text = (f"近 {len(done)} 笔已出结果推荐胜率 {wr:.0f}%、平均每笔 {avg:+.1f}%，"
                 f"有赚有亏，严格执行止损止盈即可。")
+    # 基准对比：同期沪深300平均涨跌幅与超额收益（跑赢大盘才算真赚）
+    if "同期沪深300%" in done.columns:
+        d2 = done.dropna(subset=["同期沪深300%"])
+        if len(d2) > 0:
+            bm = d2["同期沪深300%"].mean()
+            ex = (d2["盈亏%"] - d2["同期沪深300%"]).mean()
+            text += f" 同期沪深300平均 {bm:+.1f}%，平均超额 {ex:+.1f}%。"
     saved = rv["_saved"].sum()
     if saved > 0:
         text += f" 止损纪律避免了约 {saved:.0f} 元额外亏损。"
@@ -289,7 +345,7 @@ with st.sidebar:
                               value=int(load_settings()["capital"]), step=100,
                               help="本次修改仅当前页面生效；永久修改请到 GitHub 仓库编辑 推荐设置.json")
     n_picks = auto_pick_count(capital)
-    st.caption(f"推荐只数：{n_picks} 只（按本金自动分配，单笔≥700元）")
+    st.caption(f"只数由本金+预期收益自动计算（约 {n_picks} 只起，单笔≥1000元）")
     # 股价上限：保证各只买100股也买得起；本金越大上限越宽，最高20元（保持低价股策略）
     MAX_PRICE = max(MIN_PRICE + 0.5, min(20.0, capital / (n_picks * 100) * 0.95))
     st.caption(f"行情快照时间：{spot_cache_time()}")
@@ -318,7 +374,7 @@ def screen_impl() -> pd.DataFrame:
         df["代码"].map(_board_ok)
         & ~df["代码"].isin(lhb)                           # 剔除近一月上过龙虎榜的游资爆炒股
         & ~name.str.contains("ST|退", na=False)          # 剔除ST/退市股
-        & df["最新价"].between(MIN_PRICE, MAX_PRICE)      # 价格区间：2200元买3只也买得起
+        & df["最新价"].between(MIN_PRICE, MAX_PRICE)      # 价格区间：2200元买2只也买得起
         & (df["成交额"] > 5e7)                            # 日成交额>5000万，保证能顺利卖出
         & df["市盈率-动态"].between(0, 80)                # 剔除亏损股和泡沫股
         & df["总市值"].between(3e9, 2e11)                 # 30亿~2000亿，避开微盘操纵股和超级大盘股
@@ -444,8 +500,8 @@ def allocate(picks: pd.DataFrame, budget0: float) -> pd.DataFrame:
             "盈利概率": round(r["胜率"], 0),
             "预计盈利(元)": est_win,
             "预计亏损(元)": -est_loss,
-            "止损价(跌破必卖)": round(price * (1 - STOP_LOSS_PCT), 2),
-            "止盈参考(到价考虑卖)": round(price * (1 + TAKE_PROFIT_PCT), 2),
+            "止损价(买入价×0.95)": round(price * (1 - STOP_LOSS_PCT), 2),
+            "止盈参考(买入价×1.10)": round(price * (1 + TAKE_PROFIT_PCT), 2),
             "_win_prob": win_prob,
             "_est_win": est_win, "_est_loss": est_loss,
         })
@@ -465,23 +521,25 @@ with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}条，自动更新�
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("推荐总数", f"{len(rv)} 条")
         if len(done) > 0:
-            wins = int(done["结果"].isin(["🎯止盈", "📈持有中盈利"]).sum())
+            wins = int(done["结果"].isin(["🎯止盈", "🏁到期盈利"]).sum())
             m2.metric("胜率", f"{wins / len(done) * 100:.0f}%（{wins}/{len(done)}）")
-            m3.metric("平均5日盈亏", f"{done['盈亏%'].mean():+.2f}%")
+            m3.metric("平均每笔盈亏", f"{done['盈亏%'].mean():+.2f}%")
             m4.metric("累计盈亏", f"{done['_盈亏额'].sum():+.0f} 元")
         else:
             m2.metric("胜率", "—")
-            m3.metric("平均5日盈亏", "—")
+            m3.metric("平均每笔盈亏", "—")
             m4.metric("累计盈亏", "—")
-        st.dataframe(rv[["日期", "名称", "推荐价", "现价", "盈亏%", "结果"]],
+        st.dataframe(rv[["日期", "名称", "推荐价", "现价", "盈亏%", "同期沪深300%", "结果"]],
                      width="stretch", hide_index=True,
-                     column_config={"盈亏%": st.column_config.NumberColumn(format="%+.2f%%")})
+                     column_config={"盈亏%": st.column_config.NumberColumn(format="%+.2f%%"),
+                                    "同期沪深300%": st.column_config.NumberColumn(format="%+.2f%%")})
         st.info("💡 " + review_conclusion(rv))
-        st.caption("判定规则：推荐日后5个交易日内，收盘涨超+10%为🎯止盈、跌破-5%为🛑止损；"
-                   "现价为止盈/止损触发价或第5日收盘价；未满5个交易日的标 ⏳，不计入胜率。")
+        st.caption("判定规则：推荐日后最长跟踪20个交易日，收盘涨超+10%为🎯止盈、跌破-5%为🛑止损；"
+                   "满20日未触发按到期收盘定盈亏（🏁）；现价为止盈/止损触发价或最新收盘；"
+                   "未满20日且未触发的标 ⏳持有中，不计入胜率。")
 
 # ---------------- 页面：一个按钮 + 一张结果表 ----------------
-st.caption(f"本金 {capital:.0f} 元 · 全部分摊买入 {n_picks} 只 · 股价上限 {MAX_PRICE:.1f} 元 · 已内置手续费/止损/回测验证")
+st.caption(f"本金 {capital:.0f} 元 · 只数由本金+预期收益自动优化 · 股价上限 {MAX_PRICE:.1f} 元 · 已内置手续费/止损/回测验证")
 run = st.button("🔍 今日选股", type="primary", use_container_width=True)
 
 if run:
@@ -522,12 +580,13 @@ if run:
         st.error(f"⚠️ 排雷：{len(mined)} 只候选股近7天有利空新闻，已自动排除——")
         for _, m in mined.iterrows():
             st.markdown(f"- **{m['名称']}（{m['代码']}）**：{m['利空标题']}")
-    picks = pick_top3(res, n_picks)
-    if len(picks) == 0:
+    ranked = pick_top3(res, min(len(res), 20))   # 评分前20作候选池，只数交给收益优化器
+    if len(ranked) == 0:
         st.warning("今天没有股票通过回测+排雷验证。空仓也是一种操作，明天再来。")
         st.stop()
 
-    plan, leftover = allocate(picks, float(capital))
+    plan, n_final = best_plan(ranked, float(capital))
+    leftover = float(capital) - float(plan["投入(含佣金)"].sum())
 
     # ---- 汇总指标：总投入 / 期望收益 / 整体盈利概率 ----
     total_in = plan["投入(含佣金)"].sum()
@@ -555,7 +614,8 @@ if run:
     for _, p in plan.iterrows():
         st.markdown(
             f"- **{p['名称']}（{p['代码']}）**：挂单 **{p['现价']}** 元附近买 **{p['买入股数']} 股**；"
-            f"跌破 **{p['止损价(跌破必卖)']}** 元无条件卖出；涨到 **{p['止盈参考(到价考虑卖)']}** 元附近可卖。"
+            f"止损=你的实际买入价×0.95（按现价约 **{p['止损价(买入价×0.95)']}** 元），跌破无条件卖；"
+            f"止盈=实际买入价×1.10（按现价约 **{p['止盈参考(买入价×1.10)']}** 元），到价考虑卖。"
         )
     st.caption("规则只有两条：止损必须执行；单只持有超过20个交易日仍不涨，也卖出。"
                "本结果为历史数据回测推演，不构成投资建议，盈亏自负。")

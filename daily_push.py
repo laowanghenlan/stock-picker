@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-每日自动推送脚本（由 GitHub Actions 定时触发，周一至周五北京时间 6:30）
-流程：全市场筛选 -> 扣费回测 -> 舆情排雷 -> 取前3只 -> 分配本金 -> QQ邮箱推送
+每日自动推送脚本（由 GitHub Actions 定时触发，周一至周五北京时间 9:00）
+流程：全市场筛选 -> 扣费回测 -> 舆情排雷 -> 本金+收益自动定只数 -> 分配本金 -> QQ邮箱推送
 """
 import json
 import os
@@ -61,34 +61,41 @@ def build_email() -> str:
             lines.append(f"  - {m['名称']}（{m['代码']}）：{m['利空标题']}")
         lines.append("")
 
-    n_picks = app.auto_pick_count(CAPITAL)
-    picks = app.pick_top3(res, n_picks)
-    if len(picks) == 0:
+    ranked = app.pick_top3(res, min(len(res), 20))   # 评分前20作候选池，只数交给收益优化器
+    if len(ranked) == 0:
         lines.append("今日无股票通过扣费回测与排雷验证，空仓也是一种操作。")
         return "\n".join(lines)
 
-    plan, left = app.allocate(picks, CAPITAL)
-    lines.append(f"今日推荐：本金 {CAPITAL:.0f} 元，按本金自动分配为 {n_picks} 只，"
-                 f"计划投入 {plan['投入(含佣金)'].sum():.0f} 元，剩余 {left:.0f} 元")
+    plan, n_picks = app.best_plan(ranked, CAPITAL)
+    lines.append(f"今日推荐：本金 {CAPITAL:.0f} 元，按本金+预期收益自动算出 {n_picks} 只，"
+                 f"计划投入 {plan['投入(含佣金)'].sum():.0f} 元，"
+                 f"剩余 {CAPITAL - plan['投入(含佣金)'].sum():.0f} 元")
     lines.append("")
     for _, p in plan.iterrows():
         lines.append(
             f"{p['名称']}（{p['代码']}）现价 {p['现价']:.2f} 元 | "
             f"买入 {int(p['买入股数'])} 股 约 {p['投入(含佣金)']:.0f} 元 | "
             f"盈利概率 {p['盈利概率']:.0f}% | "
-            f"止损 {p['止损价(跌破必卖)']:.2f} 元 | 止盈参考 {p['止盈参考(到价考虑卖)']:.2f} 元"
+            f"止损=买入价×0.95（约 {p['止损价(买入价×0.95)']:.2f} 元） | "
+            f"止盈=买入价×1.10（约 {p['止盈参考(买入价×1.10)']:.2f} 元）"
         )
     # —— 复盘摘要：直接附在邮件里，连网页都不用点开 ——
     try:
         rv = app.review_impl()                       # 复用 app 的复盘逻辑（只读历史推荐，不影响选股）
         if rv is not None and len(rv) > 0:
-            done = rv[rv["_done"]]                   # 只统计已满5个交易日的
+            done = rv[rv["_done"]]                   # 只统计已出结果的（止盈/止损/到期）
             if len(done) > 0:
-                wins = int(done["结果"].isin(["🎯止盈", "📈持有中盈利"]).sum())
+                wins = int(done["结果"].isin(["🎯止盈", "🏁到期盈利"]).sum())
                 total_pnl = rv["_盈亏额"].sum()
                 lines += ["", "【复盘】最近推荐表现（自动统计，无需打开网页）",
                           f"已出结果 {len(done)} 笔 | 胜率 {wins / len(done) * 100:.0f}% | "
                           f"累计盈亏 {total_pnl:+.0f} 元"]
+                if "同期沪深300%" in done.columns:
+                    d2 = done.dropna(subset=["同期沪深300%"])
+                    if len(d2) > 0:                # 基准对比：跑赢大盘才算真赚
+                        bm = d2["同期沪深300%"].mean()
+                        ex = (d2["盈亏%"] - d2["同期沪深300%"]).mean()
+                        lines.append(f"同期沪深300平均 {bm:+.1f}% | 平均超额 {ex:+.1f}%")
                 for _, r2 in rv.head(5).iterrows():  # 最多列最近5条明细
                     lines.append(f"  {r2['日期']} {r2['名称']} {r2['结果']} {r2['盈亏%']:+.1f}%")
                 lines.append("结论：" + app.review_conclusion(rv))
