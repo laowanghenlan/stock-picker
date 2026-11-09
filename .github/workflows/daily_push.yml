@@ -1,0 +1,36 @@
+# 周一至周五北京时间 6:30 自动选股并发送QQ邮件
+# GitHub 使用 UTC 时间，北京 6:30 = UTC 前一天 22:30，因此 cron 为周日~周四 22:30
+name: 每日选股推送
+
+on:
+  schedule:
+    - cron: '30 22 * * 0-4'      # UTC 周日~周四 22:30 = 北京 周一~周五 6:30
+  workflow_dispatch:              # 允许在 Actions 页面手动点 Run 测试
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 运行选股并发送邮件
+        env:
+          QQ_EMAIL: ${{ secrets.QQ_EMAIL }}            # 在仓库 Settings→Secrets 里配置
+          QQ_AUTH_CODE: ${{ secrets.QQ_AUTH_CODE }}    # QQ邮箱SMTP授权码
+          CAPITAL: '2200'
+        run: python daily_push.py
+
+      - name: 推送记录回传仓库（供周末复盘）
+        run: |
+          git config user.name "stock-bot"
+          git config user.email "stock-bot@local"
+          git add 推送记录.csv
+          git diff --cached --quiet || git commit -m "推送记录 $(date +%F)"
+          git push
