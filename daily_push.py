@@ -78,6 +78,23 @@ def build_email() -> str:
             f"盈利概率 {p['盈利概率']:.0f}% | "
             f"止损 {p['止损价(跌破必卖)']:.2f} 元 | 止盈参考 {p['止盈参考(到价考虑卖)']:.2f} 元"
         )
+    # —— 复盘摘要：直接附在邮件里，连网页都不用点开 ——
+    try:
+        rv = app.review_impl()                       # 复用 app 的复盘逻辑（只读历史推荐，不影响选股）
+        if rv is not None and len(rv) > 0:
+            done = rv[rv["_done"]]                   # 只统计已满5个交易日的
+            if len(done) > 0:
+                wins = int(done["结果"].isin(["🎯止盈", "📈持有中盈利"]).sum())
+                total_pnl = rv["_盈亏额"].sum()
+                lines += ["", "【复盘】最近推荐表现（自动统计，无需打开网页）",
+                          f"已出结果 {len(done)} 笔 | 胜率 {wins / len(done) * 100:.0f}% | "
+                          f"累计盈亏 {total_pnl:+.0f} 元"]
+                for _, r2 in rv.head(5).iterrows():  # 最多列最近5条明细
+                    lines.append(f"  {r2['日期']} {r2['名称']} {r2['结果']} {r2['盈亏%']:+.1f}%")
+                lines.append("结论：" + app.review_conclusion(rv))
+    except Exception as e:                           # 复盘失败绝不影响正常推荐和发邮件
+        print("复盘摘要生成失败(不影响推荐):", e)
+
     lines += ["", "纪律：跌破止损价无条件卖出；持有超20个交易日不涨也卖。",
               "",  # 空行分隔
               "📊 网页版（点开自动看复盘，无需任何操作）：",
