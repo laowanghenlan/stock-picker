@@ -91,7 +91,6 @@ HOLDINGS_FILE = Path(__file__).parent / "持仓.csv"
 SETTINGS_FILE = Path(__file__).parent / "推荐设置.json"
 # 字段含义：capital = 本金（元）。JSON 不支持注释，含义写在这里
 DEFAULT_SETTINGS = {"capital": 2200}
-GH_REPO = "laowanghenlan/stock-picker"      # save_settings 通过 Contents API 写回这个仓库
 
 
 def load_settings() -> dict:
@@ -101,36 +100,6 @@ def load_settings() -> dict:
         return {"capital": float(data.get("capital", DEFAULT_SETTINGS["capital"]))}
     except Exception:
         return dict(DEFAULT_SETTINGS)
-
-
-def save_settings(capital: float) -> bool:
-    """把本金提交到仓库 推荐设置.json（GitHub REST API：先 GET 拿文件 sha，再 PUT 覆盖，
-    content 为 base64 编码的 JSON）。token 从 st.secrets["GH_TOKEN"] 读取——需在
-    Streamlit Cloud 的 App settings → Secrets 里配置（fine-grained PAT，
-    只给本仓库 Contents: write 权限）。本地无 secrets 或任何网络异常都返回 False，不崩溃。"""
-    try:
-        token = st.secrets["GH_TOKEN"]
-    except Exception:
-        st.warning("本地模式不支持云端保存（未配置 GH_TOKEN），本次修改仅在当前页面生效。")
-        return False
-    url = f"https://api.github.com/repos/{GH_REPO}/contents/推荐设置.json"
-    headers = {"Authorization": f"Bearer {token}",
-               "Accept": "application/vnd.github+json",
-               "X-GitHub-Api-Version": "2022-11-28"}
-    try:
-        r = requests.get(url, headers=headers, timeout=15)          # 先取文件当前 sha
-        r.raise_for_status()
-        sha = r.json()["sha"]
-        content = base64.b64encode(
-            json.dumps({"capital": capital}, ensure_ascii=False, indent=2)
-            .encode("utf-8")).decode("ascii")
-        r2 = requests.put(url, headers=headers, timeout=15, json={
-            "message": f"chore: 网页更新本金为 {capital:.0f} 元",
-            "content": content, "sha": sha})
-        r2.raise_for_status()
-        return True
-    except Exception:
-        return False
 
 
 def load_holdings() -> pd.DataFrame:
@@ -314,16 +283,11 @@ with st.expander("💼 我的持仓（填入代码和成本价，点选股时自
 
 # ---------------- 侧边栏：本金设置 + 数据状态与手动刷新 ----------------
 with st.sidebar:
-    # 本金默认值来自仓库 推荐设置.json；点保存按钮可通过 GitHub API 云端永久保存，
-    # 保存成功后网页和每日邮件都按新本金计算
+    # 本金默认值来自仓库 推荐设置.json；要永久修改：GitHub 网页打开该文件 → 铅笔图标 → 改数字 → Commit，
+    # 网页和每日邮件都会自动用新本金（无需任何令牌配置）
     capital = st.number_input("💰 本金（元）", min_value=1000, max_value=100000,
-                              value=int(load_settings()["capital"]), step=100)
-    if st.button("💾 保存为本金默认值", use_container_width=True):
-        if save_settings(float(capital)):
-            st.cache_data.clear()                    # 清缓存让设置立即重读
-            st.success(f"已保存，网页和邮件以后都按 {capital:.0f} 元计算（云端约1分钟后生效）")
-        else:
-            st.warning("保存失败，不影响页面其他功能，本次修改仅在当前页面生效。")
+                              value=int(load_settings()["capital"]), step=100,
+                              help="本次修改仅当前页面生效；永久修改请到 GitHub 仓库编辑 推荐设置.json")
     n_picks = auto_pick_count(capital)
     st.caption(f"推荐只数：{n_picks} 只（按本金自动分配，单笔≥700元）")
     # 股价上限：保证各只买100股也买得起；本金越大上限越宽，最高20元（保持低价股策略）
