@@ -3,6 +3,7 @@
 每日自动推送脚本（由 GitHub Actions 定时触发，周一至周五北京时间 6:30）
 流程：全市场筛选 -> 扣费回测 -> 舆情排雷 -> 取前3只 -> 分配本金 -> QQ邮箱推送
 """
+import json
 import os
 import smtplib
 import sys
@@ -14,7 +15,19 @@ import pandas as pd
 
 import app  # 复用 web 应用的选股逻辑；裸运行无 ScriptRunContext，一律调 *_impl 版本（绕开 st.cache_data）
 
-CAPITAL = float(os.environ.get("CAPITAL", "2200"))     # 本金，可用环境变量覆盖
+
+def _load_capital() -> float:
+    """本金读取优先级：仓库 推荐设置.json 的 capital > 环境变量 CAPITAL > 2200。
+    GitHub Actions checkout 出来的代码自带 推荐设置.json，直接读本地文件即可；
+    网页保存本金后，第二天邮件自动按新本金计算（与 web 端共用同一份设置）。"""
+    try:
+        settings_file = Path(__file__).parent / "推荐设置.json"   # 字段含义：capital=本金（元）
+        return float(json.loads(settings_file.read_text(encoding="utf-8"))["capital"])
+    except Exception:
+        return float(os.environ.get("CAPITAL", "2200"))
+
+
+CAPITAL = _load_capital()                             # 本金（元），web 与邮件统一来源
 TO_ADDR = os.environ["QQ_EMAIL"]                        # 收件邮箱（与发件邮箱相同）
 AUTH_CODE = os.environ["QQ_AUTH_CODE"]                  # QQ邮箱SMTP授权码（存于GitHub Secrets）
 LOG_FILE = Path(__file__).parent / "推送记录.csv"       # 推送留档，供周末复盘用

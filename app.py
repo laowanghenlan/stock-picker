@@ -5,11 +5,14 @@
 
 启动方式：streamlit run app.py
 """
+import base64
 import datetime as dt
+import json
 from pathlib import Path
 
 import akshare as ak
 import pandas as pd
+import requests
 import streamlit as st
 
 from data import (get_history, get_history_impl, get_spot, get_spot_impl,
@@ -83,6 +86,51 @@ lhb_codes = st.cache_data(ttl=43200, show_spinner=False)(lhb_codes_impl)
 
 
 HOLDINGS_FILE = Path(__file__).parent / "持仓.csv"
+
+# ---------------- 推荐设置（本金默认值，存仓库文件，网页与每日邮件共用） ----------------
+SETTINGS_FILE = Path(__file__).parent / "推荐设置.json"
+# 字段含义：capital = 本金（元）。JSON 不支持注释，含义写在这里
+DEFAULT_SETTINGS = {"capital": 2200}
+GH_REPO = "laowanghenlan/stock-picker"      # save_settings 通过 Contents API 写回这个仓库
+
+
+def load_settings() -> dict:
+    """读取本地仓库里的 推荐设置.json，返回 dict；文件缺失/损坏时返回默认值 {"capital": 2200}"""
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        return {"capital": float(data.get("capital", DEFAULT_SETTINGS["capital"]))}
+    except Exception:
+        return dict(DEFAULT_SETTINGS)
+
+
+def save_settings(capital: float) -> bool:
+    """把本金提交到仓库 推荐设置.json（GitHub REST API：先 GET 拿文件 sha，再 PUT 覆盖，
+    content 为 base64 编码的 JSON）。token 从 st.secrets["GH_TOKEN"] 读取——需在
+    Streamlit Cloud 的 App settings → Secrets 里配置（fine-grained PAT，
+    只给本仓库 Contents: write 权限）。本地无 secrets 或任何网络异常都返回 False，不崩溃。"""
+    try:
+        token = st.secrets["GH_TOKEN"]
+    except Exception:
+        st.warning("本地模式不支持云端保存（未配置 GH_TOKEN），本次修改仅在当前页面生效。")
+        return False
+    url = f"https://api.github.com/repos/{GH_REPO}/contents/推荐设置.json"
+    headers = {"Authorization": f"Bearer {token}",
+               "Accept": "application/vnd.github+json",
+               "X-GitHub-Api-Version": "2022-11-28"}
+    try:
+        r = requests.get(url, headers=headers, timeout=15)          # 先取文件当前 sha
+        r.raise_for_status()
+        sha = r.json()["sha"]
+        content = base64.b64encode(
+            json.dumps({"capital": capital}, ensure_ascii=False, indent=2)
+            .encode("utf-8")).decode("ascii")
+        r2 = requests.put(url, headers=headers, timeout=15, json={
+            "message": f"chore: 网页更新本金为 {capital:.0f} 元",
+            "content": content, "sha": sha})
+        r2.raise_for_status()
+        return True
+    except Exception:
+        return False
 
 
 def load_holdings() -> pd.DataFrame:
@@ -253,13 +301,8 @@ else:
     st.success(f"☀️ 大盘温度正常：沪深300（{idx_close:.0f}）位于60日线上方")
     force_run = True
 
-# ---------------- 本金输入（灵活可调，改完点按钮重新选股） ----------------
-capital = st.number_input("💰 本金（元）", min_value=1000, max_value=100000,
-                          value=2200, step=100)
-n_picks = auto_pick_count(capital)
-st.caption(f"推荐只数：{n_picks} 只（按本金自动分配，单笔≥700元）")
-# 股价上限：保证各只买100股也买得起；本金越大上限越宽，最高20元（保持低价股策略）
-MAX_PRICE = max(MIN_PRICE + 0.5, min(20.0, capital / (n_picks * 100) * 0.95))
+# ---------------- 本金输入在侧边栏（见下方 sidebar 区块），此处仅保留说明 ----------------
+# capital / n_picks / MAX_PRICE 均在侧边栏代码里赋值，本文件后面的选股逻辑直接使用
 
 # ---------------- 我的持仓（每天自动体检：止损/止盈/利空） ----------------
 with st.expander("💼 我的持仓（填入代码和成本价，点选股时自动体检，自动保存）", expanded=True):
@@ -269,8 +312,22 @@ with st.expander("💼 我的持仓（填入代码和成本价，点选股时自
                                              "成本价": st.column_config.NumberColumn("成本价", format="%.2f"),
                                              "股数": st.column_config.NumberColumn("股数", format="%d")})
 
-# ---------------- 侧边栏：数据状态与手动刷新 ----------------
+# ---------------- 侧边栏：本金设置 + 数据状态与手动刷新 ----------------
 with st.sidebar:
+    # 本金默认值来自仓库 推荐设置.json；点保存按钮可通过 GitHub API 云端永久保存，
+    # 保存成功后网页和每日邮件都按新本金计算
+    capital = st.number_input("💰 本金（元）", min_value=1000, max_value=100000,
+                              value=int(load_settings()["capital"]), step=100)
+    if st.button("💾 保存为本金默认值", use_container_width=True):
+        if save_settings(float(capital)):
+            st.cache_data.clear()                    # 清缓存让设置立即重读
+            st.success(f"已保存，网页和邮件以后都按 {capital:.0f} 元计算（云端约1分钟后生效）")
+        else:
+            st.warning("保存失败，不影响页面其他功能，本次修改仅在当前页面生效。")
+    n_picks = auto_pick_count(capital)
+    st.caption(f"推荐只数：{n_picks} 只（按本金自动分配，单笔≥700元）")
+    # 股价上限：保证各只买100股也买得起；本金越大上限越宽，最高20元（保持低价股策略）
+    MAX_PRICE = max(MIN_PRICE + 0.5, min(20.0, capital / (n_picks * 100) * 0.95))
     st.caption(f"行情快照时间：{spot_cache_time()}")
     if st.button("🔄 刷新行情数据", use_container_width=True):
         with st.spinner("正在联网刷新全市场行情，约1分钟..."):
