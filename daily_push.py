@@ -99,6 +99,8 @@ def build_email() -> str:
               "",  # 空行分隔
               "📊 网页版（点开自动看复盘，无需任何操作）：",
               "https://stock-picker-mi5bntxj6x4fzrntgtzvko.streamlit.app/",
+              f"💰 改本金（当前 {CAPITAL:.0f} 元；点链接 → 铅笔图标 → 改数字 → 绿色Commit，下次邮件生效）：",
+              "https://github.com/laowanghenlan/stock-picker/blob/master/推荐设置.json",
               "（本邮件为量化程序自动生成，仅为历史数据推演，不构成投资建议）"]
     # 留档供周末复盘
     rec = plan[["代码", "名称", "现价", "买入股数"]].copy()
