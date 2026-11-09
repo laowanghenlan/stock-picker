@@ -125,10 +125,16 @@ def check_holdings(hd: pd.DataFrame, spot: pd.DataFrame) -> pd.DataFrame:
                      "浮动盈亏%": round(pnl, 2), "操作": act})
     return pd.DataFrame(rows)
 
+def auto_pick_count(capital: float) -> int:
+    """按本金自动决定推荐只数：单笔不低于700元（佣金最低5元占比约0.7%可接受），
+    最多5只（分散上限），最少1只"""
+    return max(1, min(5, int(capital // 700)))
+
+
 # ---------------- 固定参数（本金由页面输入，其余固化在后台） ----------------
 MIN_PRICE = 2.0         # 股价下限：避开1元股退市风险区
 CANDIDATES = 15         # 初筛后进入回测验证的候选数量
-PICKS = 3               # 最终输出股票数
+PICKS = 3               # 最终输出股票数（兜底默认值，实际只数由 auto_pick_count(本金) 决定）
 STOP_LOSS_PCT = 0.05    # 止损线：跌5%必须卖
 TAKE_PROFIT_PCT = 0.10  # 止盈参考：涨10%考虑落袋
 HISTORY_DAYS = 500      # 回测用的历史天数
@@ -250,8 +256,10 @@ else:
 # ---------------- 本金输入（灵活可调，改完点按钮重新选股） ----------------
 capital = st.number_input("💰 本金（元）", min_value=1000, max_value=100000,
                           value=2200, step=100)
-# 股价上限：保证 PICKS 只各买100股也买得起；本金越大上限越宽，最高20元（保持低价股策略）
-MAX_PRICE = max(MIN_PRICE + 0.5, min(20.0, capital / (PICKS * 100) * 0.95))
+n_picks = auto_pick_count(capital)
+st.caption(f"推荐只数：{n_picks} 只（按本金自动分配，单笔≥700元）")
+# 股价上限：保证各只买100股也买得起；本金越大上限越宽，最高20元（保持低价股策略）
+MAX_PRICE = max(MIN_PRICE + 0.5, min(20.0, capital / (n_picks * 100) * 0.95))
 
 # ---------------- 我的持仓（每天自动体检：止损/止盈/利空） ----------------
 with st.expander("💼 我的持仓（填入代码和成本价，点选股时自动体检，自动保存）", expanded=True):
@@ -368,7 +376,7 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
 verify = verify_impl
 
 
-def pick_top3(res: pd.DataFrame) -> pd.DataFrame:
+def pick_top3(res: pd.DataFrame, n: int = PICKS) -> pd.DataFrame:
     """第三步：综合打分。
     扣费收益占大头，胜率其次，趋势向上是必须条件（不满足扣大分）。"""
     res = res.copy()
@@ -380,7 +388,7 @@ def pick_top3(res: pd.DataFrame) -> pd.DataFrame:
     res = res.sort_values("总分", ascending=False)
     # 只保留扣费后还能赚钱、且近7天无利空新闻的股票
     res = res[(res["扣费总收益"] > 0) & (~res["有雷"])]
-    return res.head(PICKS)
+    return res.head(n)
 
 
 def allocate(picks: pd.DataFrame, budget0: float) -> pd.DataFrame:
@@ -452,7 +460,7 @@ with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}条，自动更新�
                    "现价为止盈/止损触发价或第5日收盘价；未满5个交易日的标 ⏳，不计入胜率。")
 
 # ---------------- 页面：一个按钮 + 一张结果表 ----------------
-st.caption(f"本金 {capital:.0f} 元 · 全部分摊买入 {PICKS} 只 · 股价上限 {MAX_PRICE:.1f} 元 · 已内置手续费/止损/回测验证")
+st.caption(f"本金 {capital:.0f} 元 · 全部分摊买入 {n_picks} 只 · 股价上限 {MAX_PRICE:.1f} 元 · 已内置手续费/止损/回测验证")
 run = st.button("🔍 今日选股", type="primary", use_container_width=True)
 
 if run:
@@ -493,7 +501,7 @@ if run:
         st.error(f"⚠️ 排雷：{len(mined)} 只候选股近7天有利空新闻，已自动排除——")
         for _, m in mined.iterrows():
             st.markdown(f"- **{m['名称']}（{m['代码']}）**：{m['利空标题']}")
-    picks = pick_top3(res)
+    picks = pick_top3(res, n_picks)
     if len(picks) == 0:
         st.warning("今天没有股票通过回测+排雷验证。空仓也是一种操作，明天再来。")
         st.stop()

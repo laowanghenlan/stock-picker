@@ -48,13 +48,15 @@ def build_email() -> str:
             lines.append(f"  - {m['名称']}（{m['代码']}）：{m['利空标题']}")
         lines.append("")
 
-    picks = app.pick_top3(res)
+    n_picks = app.auto_pick_count(CAPITAL)
+    picks = app.pick_top3(res, n_picks)
     if len(picks) == 0:
         lines.append("今日无股票通过扣费回测与排雷验证，空仓也是一种操作。")
         return "\n".join(lines)
 
     plan, left = app.allocate(picks, CAPITAL)
-    lines.append(f"今日推荐：本金 {CAPITAL:.0f} 元，计划投入 {plan['投入(含佣金)'].sum():.0f} 元，剩余 {left:.0f} 元")
+    lines.append(f"今日推荐：本金 {CAPITAL:.0f} 元，按本金自动分配为 {n_picks} 只，"
+                 f"计划投入 {plan['投入(含佣金)'].sum():.0f} 元，剩余 {left:.0f} 元")
     lines.append("")
     for _, p in plan.iterrows():
         lines.append(
