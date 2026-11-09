@@ -1,0 +1,5 @@
+# 不提交缓存与持仓数据
+spot_cache.csv
+持仓.csv
+__pycache__/
+*.pyc

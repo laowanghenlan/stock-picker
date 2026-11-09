@@ -1,0 +1,6 @@
+# 部署到 Streamlit Cloud 所需依赖（版本与本地一致）
+streamlit==1.67.0
+akshare==1.20.36
+pandas==3.1.1
+plotly==7.1.0
+numpy==2.5.4
