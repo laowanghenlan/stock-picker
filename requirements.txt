@@ -5,4 +5,4 @@ pandas==3.1.1
 plotly==7.1.0
 numpy==2.5.4
 requests==2.34.2
-baostock==0.8.9
+baostock==0.9.4
