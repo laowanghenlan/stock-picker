@@ -329,31 +329,26 @@ else:
 # ---------------- 本金输入在侧边栏（见下方 sidebar 区块），此处仅保留说明 ----------------
 # capital / n_picks / MAX_PRICE 均在侧边栏代码里赋值，本文件后面的选股逻辑直接使用
 
-# ---------------- 我的持仓（每天自动体检：止损/止盈/利空） ----------------
-with st.expander("💼 我的持仓（填入代码和成本价，点选股时自动体检，自动保存）", expanded=True):
-    holdings = st.data_editor(load_holdings(), num_rows="dynamic",
-                              width='stretch', key="holdings_editor",
-                              column_config={"代码": st.column_config.TextColumn("代码(6位)"),
-                                             "成本价": st.column_config.NumberColumn("成本价", format="%.2f"),
-                                             "股数": st.column_config.NumberColumn("股数", format="%d")})
+# ---------------- 我的持仓（自动读本地持仓.csv，每天选股时自动体检） ----------------
+with st.expander("💼 持仓体检（自动读持仓.csv，选股时自动执行）", expanded=True):
+    holdings = load_holdings()
+    if len(holdings) == 0 or holdings.iloc[0].isna().all():
+        st.info("📭 暂无持仓。有持仓想自动体检？编辑同目录下的 持仓.csv（列：代码,成本价,股数），下次选股自动识别。")
+        holdings = pd.DataFrame(columns=["代码", "成本价", "股数"])
+    else:
+        st.caption(f"已加载 {len(holdings)} 只持仓，选股时自动体检止损/止盈/利空。")
 
-# ---------------- 侧边栏：本金设置 + 数据状态与手动刷新 ----------------
+# ---------------- 侧边栏：只保留本金输入（行情/复盘/因子/熔断全部自动） ----------------
 with st.sidebar:
-    # 本金默认值来自仓库 推荐设置.json；要永久修改：GitHub 网页打开该文件 → 铅笔图标 → 改数字 → Commit，
-    # 网页和每日邮件都会自动用新本金（无需任何令牌配置）
     capital = st.number_input("💰 本金（元）", min_value=1000, max_value=100000,
                               value=int(load_settings()["capital"]), step=100,
                               help="本次修改仅当前页面生效；永久修改请到 GitHub 仓库编辑 推荐设置.json")
     n_picks = auto_pick_count(capital)
     st.caption(f"只数由本金+预期收益自动计算（约 {n_picks} 只起，单笔≥1000元）")
-    # 股价上限：保证各只买100股也买得起；本金越大上限越宽，最高20元（保持低价股策略）
-    MAX_PRICE = max(MIN_PRICE + 0.5, min(20.0, capital / (n_picks * 100) * 0.95))
     st.caption(f"行情快照时间：{spot_cache_time()}")
-    if st.button("🔄 刷新行情数据", width='stretch'):
-        with st.spinner("正在联网刷新全市场行情，约1分钟..."):
-            refresh_spot()
-        st.rerun()
-    st.caption("平时不用点：每个交易日开盘后首次打开会自动更新。")
+
+# 股价上限：保证各只买100股也买得起；本金越大上限越宽，最高20元（保持低价股策略）
+MAX_PRICE = max(MIN_PRICE + 0.5, min(20.0, capital / (n_picks * 100) * 0.95))
 
 # ---------------- 选股流水线（全部后台执行） ----------------
 def _board_ok(code: str) -> bool:
@@ -645,14 +640,16 @@ st.caption(f"本金 {capital:.0f} 元 · 只数由本金+预期收益自动优�
 run = st.button("🔍 今日选股", type="primary", width='stretch')
 
 if run:
+    # 选股前自动刷新行情快照（联网失败降级用旧缓存，不阻塞选股）
+    with st.spinner("正在获取最新行情..."):
+        try:
+            refresh_spot()
+        except Exception:
+            pass
     if market_cold and not force_run:
         st.error("大盘低温期，已拦截选股。请勾选上方「我知道风险，仍要选股」后再点。")
         st.stop()
-    # 保存持仓并体检（在选股之前，持有期的风险优先于买新股）
-    try:
-        holdings.dropna(subset=["代码", "成本价"]).to_csv(HOLDINGS_FILE, index=False)
-    except PermissionError:
-        st.caption("⚠️ 持仓未能保存到本地（系统文件夹保护），本次体检仍生效，但下次需重新填写。")
+    # 持仓体检（持仓已在页面加载时自动从 持仓.csv 读取）
     hd_check = check_holdings(holdings, get_spot())
     if len(hd_check) > 0:
         st.markdown("**💼 持仓体检**")
