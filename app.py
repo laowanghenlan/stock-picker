@@ -877,5 +877,5 @@ if run:
 
 
 # ---------- 版本号：手动维护，每次改完功能 bump 一次 ----------
-APP_VERSION = "v1.4"        # v1.3→v1.4 三件套：策略熔断 + 实盘IC融合比例动态化 + 因子贡献拆解
+APP_VERSION = "v1.6"        # v1.6 自动进化引擎：evolution.py + strategy_config.json + 预写死30/60/100笔触发功能
 
