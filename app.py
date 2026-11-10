@@ -480,9 +480,46 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
         ic, ir = factors.ic_summary(ics)
         res.attrs["ic"], res.attrs["icir"] = ic, ir
         res.attrs["ic_n"] = int(len(ics))               # 参与检验的交易日数（置信度参考）
+        # 因子衰减监控：把今天的IC存进历史CSV（每天append一次，供后续趋势判断）
+        try:
+            import factor_learning
+            factor_learning.append_factor_ic_history(ic, pd.Timestamp.now().strftime("%Y-%m-%d"))
+        except Exception:
+            pass
     except Exception:
         res.attrs["ic"], res.attrs["icir"], res.attrs["ic_n"] = {}, {}, 0
-    res.attrs["ic_weights"] = factors.ic_weights(res.attrs.get("ic") or {})
+    # 基础权重（历史IC）
+    base_icw = factors.ic_weights(res.attrs.get("ic") or {})
+
+    # ========== 复盘反哺权重：用实盘盈亏融合历史IC ==========
+    blended_icw, actual_ic_used = {}, {}
+    try:
+        import factor_learning
+        rv = review_impl()
+        actual_ic = factor_learning.actual_ic_from_review(rv, res)
+        if actual_ic:
+            _, blended_icw = factor_learning.blended_ic_weights(
+                {f: v for f, v in (res.attrs.get("ic") or {}).items()},
+                actual_ic)
+            actual_ic_used = actual_ic
+    except Exception:
+        pass
+    final_icw = blended_icw if blended_icw else base_icw
+
+    # ========== 因子衰减过滤：连续30天|IC|<0.03的因子临时剔除 ==========
+    health_df = pd.DataFrame()
+    try:
+        import factor_learning
+        health_df = factor_learning.factor_health(res.attrs.get("ic") or None)
+        if len(health_df) > 0:
+            final_icw = factor_learning.filter_decayed_factors(final_icw, health_df)
+    except Exception:
+        pass
+
+    res.attrs["ic_weights"] = final_icw
+    res.attrs["ic_weights_base"] = base_icw
+    res.attrs["ic_actual"] = actual_ic_used
+    res.attrs["factor_health"] = health_df
     return res
 
 
@@ -634,13 +671,27 @@ if run:
     # 因子检验结果透明展示：哪些因子有效、权重多少、置信度如何，用户看得见
     _icv, _icw = res.attrs.get("ic") or {}, res.attrs.get("ic_weights") or {}
     _icir, _icn = res.attrs.get("icir") or {}, int(res.attrs.get("ic_n", 0) or 0)
+    _actual_ic = res.attrs.get("ic_actual") or {}
+    _health = res.attrs.get("factor_health")
+    # 区分：哪些被衰减过滤掉了
+    decayed_set = set(_health.loc[_health["健康状态"] == "衰减", "因子"].tolist()) if _health is not None and len(_health) > 0 else set()
     if _icw:
-        st.caption(f"🧬 多因子（行业中性 · 近{factors.IC_AVG_N}日IC均值 · {_icn}个交易日截面）：" + "　".join(
+        blend_tag = "· 复盘反哺融合" if _actual_ic else ""
+        st.caption(f"🧬 多因子（行业中性 · 近{factors.IC_AVG_N}日IC均值{blend_tag} · {_icn}个交易日截面）：" + "　".join(
             f"{k} IC={_icv.get(k, 0):+.3f} ICIR={_icir.get(k, 0):+.2f} 权重{_icw[k]:+.2f}"
             for k in _icw))
     else:
-        st.caption(f"🧬 本期因子IC均值全部低于{factors.IC_MIN}门槛（{_icn}个交易日截面），"
-                   "评分已自动退回回测原版。")
+        if decayed_set:
+            st.caption(f"🧬 因子衰减全灭（{decayed_set}连续≥30天IC失效），评分已退回回测原版。")
+        else:
+            st.caption(f"🧬 本期因子IC均值全部低于{factors.IC_MIN}门槛（{_icn}个交易日截面），"
+                       "评分已自动退回回测原版。")
+    if _actual_ic:
+        # 复盘反哺的实盘IC（小样本，仅供参考）
+        act_tag = "　".join(f"{k}实盘IC={v:+.3f}" for k, v in _actual_ic.items())
+        st.caption(f"📊 复盘反哺：用最近实盘盈亏校准因子权重 → {act_tag}")
+    if decayed_set:
+        st.caption(f"⛔ 衰减预警：{decayed_set}连续≥30天|IC|<{0.03}，已临时剔除，IC恢复自动归队。")
     if _icn and _icn < 60:
         st.caption(f"⚠️ 因子检验仅有 {_icn} 个交易日截面（<60），权重置信度偏低，仅供方向参考。")
 
@@ -681,5 +732,5 @@ if run:
 
 
 # ---------- 版本号：手动维护，每次改完功能 bump 一次 ----------
-APP_VERSION = "v1.2"        # v1.1→v1.2 冒烟修复：列名bug + Streamlit use_container_width→width弃用替换
+APP_VERSION = "v1.3"        # v1.2→v1.3 因子自学习：复盘反哺权重(7历史:3实盘) + 因子衰减监控(30天自动剔除)
 
