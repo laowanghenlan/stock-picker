@@ -508,8 +508,11 @@ def review_conclusion(rv: pd.DataFrame) -> str:
         text += f" 止损纪律避免了约 {saved:.0f} 元额外亏损。"
     return text
 
+APP_VERSION = "v1.8"        # v1.8 全开+置信度折扣：所有进化功能第一天启用，效果按实盘样本量线性增长；新增 PyPortfolioOpt 均值方差仓位优化（numpy 兜底）
+
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 st.title("📈 每日选股")
+st.caption(APP_VERSION)
 
 # ---------------- 大盘温度横幅（低温期提示空仓） ----------------
 idx_close, idx_ma60, market_cold = market_temperature()
@@ -1030,6 +1033,5 @@ if run:
         st.caption(f"📧 邮件未发送：{msg}")
 
 
-# ---------- 版本号：手动维护，每次改完功能 bump 一次 ----------
-APP_VERSION = "v1.8"        # v1.8 全开+置信度折扣：所有进化功能第一天启用，效果按实盘样本量线性增长；新增 PyPortfolioOpt 均值方差仓位优化（numpy 兜底）
+# ---------- 版本号：手动维护，每次改完功能 bump 一次（定义已前移到 st.title 上方，页面顶部直接显示） ----------
 
