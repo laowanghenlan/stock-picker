@@ -512,7 +512,22 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
     end_d = dt.date.today()
     start_d = end_d - dt.timedelta(days=HISTORY_DAYS)
     rows, hists, meta = [], {}, {}          # hists/meta：供因子面板与行业中性化使用
+    fundamentals = {}                         # {代码: baostock财报DataFrame}，给基本面因子用
     total = len(cands)
+    # ===== 批量拉候选股基本面（Baostock 历史财报，免费，消除估值因子前视偏差）=====
+    try:
+        import fundamental as fd
+        code_list = cands["代码"].astype(str).tolist()
+        if code_list:
+            # 拉最近 4 个季度（足够因子窗口），失败自动降级留空
+            f_batch = fd.fetch_fundamental_batch(code_list)
+            for _, fr in (f_batch.iterrows() if f_batch is not None and len(f_batch) else []):
+                cd = str(fr.get("代码", "")).zfill(6)
+                # fetch_fundamental_batch 返回单季度汇总，现在需要每只股票的时序
+                # 简单处理：把这一个季度的基本面直接当"最新"，用 fd.fetch_fundamental 拿历史序列
+                fundamentals[cd] = fd.fetch_fundamental(cd)
+    except Exception:
+        fundamentals = {}  # Baostock 挂了，降级：基本面因子全 NaN，自动跳过
     try:
         ind_map = industry_map_impl(cands["代码"].astype(str).tolist())   # 行业映射（磁盘缓存）
     except Exception:
@@ -528,7 +543,8 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
                 pe = None
             if pb is not None and pb <= 0:
                 pb = None
-            fv = factors.latest_factors(h, pe, pb)      # 最新截面因子值
+            fv = factors.latest_factors(h, pe, pb,
+                                        fundamental=fundamentals.get(code))   # 加基本面因子
             hists[code] = h
             meta[code] = {"行业": ind_map.get(code, "未分类"), "PE": pe, "PB": pb}
             sig = generate_signals(h, "ma_cross", {"fast": 5, "slow": 20},
@@ -560,7 +576,7 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
     res = pd.DataFrame(rows)
     # 因子IC检验：行业中性化 → 逐交易日横截面IC → 最近20日均值定权
     try:
-        npanel = factors.neutralize(factors.build_panel(hists, meta))
+        npanel = factors.neutralize(factors.build_panel(hists, meta, fundamentals=fundamentals))
         ics = factors.ic_series(npanel)
         ic, ir = factors.ic_summary(ics)
         res.attrs["ic"], res.attrs["icir"] = ic, ir
@@ -877,5 +893,5 @@ if run:
 
 
 # ---------- 版本号：手动维护，每次改完功能 bump 一次 ----------
-APP_VERSION = "v1.6"        # v1.6 自动进化引擎：evolution.py + strategy_config.json + 预写死30/60/100笔触发功能
+APP_VERSION = "v1.7"        # v1.7 基本面因子：Baostock 历史财报 + ROE/净利润增速/营收增速/净利率 进 IC 检验 + merge_asof 消除前视偏差
 

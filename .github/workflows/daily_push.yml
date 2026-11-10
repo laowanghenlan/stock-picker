@@ -37,6 +37,6 @@ jobs:
         run: |
           git config user.name "stock-bot"
           git config user.email "stock-bot@local"
-          git add 推送记录.csv 因子历史IC.csv strategy_config.json
+          git add 推送记录.csv 因子历史IC.csv strategy_config.json fundamental_cache/
           git diff --cached --quiet || git commit -m "每日留档 + 进化配置 $(date +%F)"
           git push

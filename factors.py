@@ -29,6 +29,10 @@ def _cfg() -> dict:
 import json  # noqa: E402
 
 FACTOR_COLS = ["动量20", "波动率20", "换手20", "EP", "BP"]
+# 基本面因子（需要 Baostock 历史财报数据，避免前视偏差）
+# IC 检验自动决定要不要进评分；Baostock 挂了自动降级（留 NaN，因子跳过）
+FUND_FACTORS = ["ROE", "净利润增速", "营收增速", "净利率"]
+ALL_FACTOR_COLS = FACTOR_COLS + FUND_FACTORS
 # 以下参数优先读 strategy_config.json，读不到用默认值（v1.4 上线时的硬编码）
 IC_MIN = float(_cfg().get("因子", {}).get("IC门槛", 0.03))
 IC_AVG_N = 20        # 用最近20个交易日的截面IC均值定权（降权重抖动）
@@ -39,8 +43,11 @@ MIN_IND = 3          # 同行业至少3只才做组内中性化，否则退回�
 DECAY_DAYS = int(_cfg().get("因子", {}).get("衰减天数", 30))
 
 
-def factor_series(h: pd.DataFrame, pe: float = None, pb: float = None) -> pd.DataFrame:
-    """把一只股票的日线转成因子时间序列（向量化，含未来5日收益标签）。"""
+def factor_series(h: pd.DataFrame, pe: float = None, pb: float = None,
+                  fundamental: pd.DataFrame = None) -> pd.DataFrame:
+    """把一只股票的日线转成因子时间序列（向量化，含未来5日收益标签）。
+    fundamental: baostock 财报 DataFrame（列：pubDate, ROE, 净利润增速, 营收增速, 净利率）
+                 按 pubDate 向后填充——因子只用发布日之后的基本面数据，消除前视偏差。"""
     close = h["收盘"]
     out = pd.DataFrame({"日期": pd.to_datetime(h["日期"])})
     out["动量20"] = close / close.shift(20) - 1
@@ -50,24 +57,50 @@ def factor_series(h: pd.DataFrame, pe: float = None, pb: float = None) -> pd.Dat
     # 估值因子用倒数：越大=越便宜，方向与IC符号一致
     out["EP"] = 1.0 / pe if (pe and pe > 0) else np.nan
     out["BP"] = 1.0 / pb if (pb and pb > 0) else np.nan
+    # 基本面因子：用 merge_asof 按 pubDate 往后填
+    if fundamental is not None and len(fundamental) > 0:
+        try:
+            out = out.sort_values("日期").reset_index(drop=True)
+            fund_cols = [c for c in FUND_FACTORS if c in fundamental.columns] + ["pubDate"]
+            f = fundamental[fund_cols].sort_values("pubDate").drop_duplicates("pubDate")
+            # 统一 dtype：pandas 3.1 要求 merge_asof 两边 datetime 精度完全一致
+            out["日期"] = pd.to_datetime(out["日期"]).astype("datetime64[ns]")
+            f["pubDate"] = pd.to_datetime(f["pubDate"]).astype("datetime64[ns]")
+            # merge_asof：out 的日期 >= f 的 pubDate，取最近的那条
+            merged = pd.merge_asof(out, f, left_on="日期", right_on="pubDate",
+                                   direction="backward")
+            for fc in FUND_FACTORS:
+                if fc in merged.columns:
+                    out[fc] = merged[fc]
+        except Exception:
+            for fc in FUND_FACTORS:
+                out[fc] = np.nan
+    else:
+        for fc in FUND_FACTORS:
+            out[fc] = np.nan
     out["未来5日收益"] = close.shift(-FWD_DAYS) / close - 1
     return out
 
 
-def latest_factors(h: pd.DataFrame, pe: float = None, pb: float = None) -> dict:
+def latest_factors(h: pd.DataFrame, pe: float = None, pb: float = None,
+                    fundamental: pd.DataFrame = None) -> dict:
     """最新一个交易日的因子值（给候选股打分用）。"""
-    s = factor_series(h, pe, pb)[FACTOR_COLS]
+    s = factor_series(h, pe, pb, fundamental=fundamental)[ALL_FACTOR_COLS]
     last = s.ffill().iloc[-1] if len(s) else pd.Series(dtype=float)
-    return {c: float(last.get(c, np.nan)) for c in FACTOR_COLS}
+    return {c: float(last.get(c, np.nan)) for c in ALL_FACTOR_COLS}
 
 
-def build_panel(hists: dict, meta: dict) -> pd.DataFrame:
+def build_panel(hists: dict, meta: dict, fundamentals: dict = None) -> pd.DataFrame:
     """把多只股票的因子序列拼成面板（长表），供逐日横截面IC计算。
-    hists: {代码: 历史DataFrame}；meta: {代码: {"行业":..., "PE":..., "PB":...}}"""
+    hists: {代码: 历史DataFrame}
+    meta: {代码: {"行业":..., "PE":..., "PB":...}}
+    fundamentals: {代码: baostock财报DataFrame}（可选，默认 None，基本面因子全为 NaN 自动跳过）"""
+    fundamentals = fundamentals or {}
     frames = []
     for code, h in hists.items():
         m = meta.get(code) or {}
-        s = factor_series(h, m.get("PE"), m.get("PB"))
+        fund = fundamentals.get(code)
+        s = factor_series(h, m.get("PE"), m.get("PB"), fundamental=fund)
         s = s.iloc[WARMUP:len(s) - FWD_DAYS]
         if len(s) == 0:
             continue
@@ -77,14 +110,16 @@ def build_panel(hists: dict, meta: dict) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
-def neutralize(panel: pd.DataFrame) -> pd.DataFrame:
+def neutralize(panel: pd.DataFrame, factor_cols: list[str] | None = None) -> pd.DataFrame:
     """行业中性化：同交易日内每个因子在行业内部转百分位（-0.5~+0.5）。
-    行业成分不足MIN_IND只时，退回该交易日全截面百分位，避免样本被大量丢弃。"""
+    factor_cols: 指定要中性化的因子列表，默认 ALL_FACTOR_COLS 里有数据的。
+    行业成分不足 MIN_IND 只时，退回该交易日全截面百分位。"""
     if len(panel) == 0:
         return panel
     df = panel.copy()
     ind = df["行业"].fillna("未分类")
-    for f in FACTOR_COLS:
+    cols = factor_cols or [f for f in ALL_FACTOR_COLS if f in df.columns]
+    for f in cols:
         if f not in df.columns:
             continue
         in_ind = df.groupby([df["日期"], ind])[f].rank(pct=True)
@@ -101,12 +136,14 @@ def ic_series(npanel: pd.DataFrame) -> pd.DataFrame:
         if len(g) < MIN_XSEC:
             continue
         row = {}
-        for f in FACTOR_COLS:
+        for f in ALL_FACTOR_COLS:
             c = f + "_n"
             if c not in g.columns:
                 continue
             d2 = g[[c, "未来5日收益"]].dropna()
-            # Spearman = 秩上的皮尔逊相关，避免依赖 scipy
+            # 基本面因子可能当天全空（不是每个季度都有财报），跳过
+            if len(d2) < MIN_XSEC * 0.5:
+                continue
             row[f] = (d2[c].rank().corr(d2["未来5日收益"].rank())
                       if len(d2) >= MIN_XSEC else np.nan)
         if row:
