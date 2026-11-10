@@ -625,7 +625,8 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
     # ===== 逐票拉候选股基本面（Baostock 历史财报，免费，消除估值因子前视偏差）=====
     try:
         import fundamental as fd
-        for cd in cands["代码"].astype(str).str.zfill(6).tolist():
+        for fi, cd in enumerate(cands["代码"].astype(str).str.zfill(6).tolist(), 1):
+            progress(0.3 * fi / total, f"拉取财报 {fi}/{total}（baostock 串行，今日首次较慢）")
             try:
                 fundamentals[cd] = fd.fetch_fundamental(cd)
             except Exception:
@@ -652,7 +653,7 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
         with ThreadPoolExecutor(max_workers=8) as pool:
             for done, (cd, h, n) in enumerate(pool.map(_fetch_one, codes_all), 1):
                 hists_pre[cd], news_pre[cd] = h, n
-                progress(0.5 * done / total, f"并发下载K线+舆情 {done}/{total}")
+                progress(0.3 + 0.35 * done / total, f"并发下载K线+舆情 {done}/{total}")
     except Exception:
         hists_pre, news_pre = {}, {}        # 预取整体失败：回落到循环内串行拉取
     try:
@@ -704,7 +705,7 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
             })
         except Exception:
             continue                                    # 单只失败不影响整体
-        progress(0.5 + 0.5 * (i + 1) / total, f"回测验证中 {i + 1}/{total}：{r['名称']}")
+        progress(0.65 + 0.35 * (i + 1) / total, f"回测验证中 {i + 1}/{total}：{r['名称']}")
     res = pd.DataFrame(rows)
     # 因子IC检验：行业中性化 → 逐交易日横截面IC → 最近20日均值定权
     try:
