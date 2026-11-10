@@ -514,20 +514,16 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
     rows, hists, meta = [], {}, {}          # hists/meta：供因子面板与行业中性化使用
     fundamentals = {}                         # {代码: baostock财报DataFrame}，给基本面因子用
     total = len(cands)
-    # ===== 批量拉候选股基本面（Baostock 历史财报，免费，消除估值因子前视偏差）=====
+    # ===== 逐票拉候选股基本面（Baostock 历史财报，免费，消除估值因子前视偏差）=====
     try:
         import fundamental as fd
-        code_list = cands["代码"].astype(str).tolist()
-        if code_list:
-            # 拉最近 4 个季度（足够因子窗口），失败自动降级留空
-            f_batch = fd.fetch_fundamental_batch(code_list)
-            for _, fr in (f_batch.iterrows() if f_batch is not None and len(f_batch) else []):
-                cd = str(fr.get("代码", "")).zfill(6)
-                # fetch_fundamental_batch 返回单季度汇总，现在需要每只股票的时序
-                # 简单处理：把这一个季度的基本面直接当"最新"，用 fd.fetch_fundamental 拿历史序列
+        for cd in cands["代码"].astype(str).str.zfill(6).tolist():
+            try:
                 fundamentals[cd] = fd.fetch_fundamental(cd)
+            except Exception:
+                continue                            # 单只失败不影响其他票
     except Exception:
-        fundamentals = {}  # Baostock 挂了，降级：基本面因子全 NaN，自动跳过
+        fundamentals = {}  # Baostock 整体不可用，降级：基本面因子全 NaN，自动跳过
     try:
         ind_map = industry_map_impl(cands["代码"].astype(str).tolist())   # 行业映射（磁盘缓存）
     except Exception:
