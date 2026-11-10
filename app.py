@@ -88,12 +88,20 @@ lhb_codes = st.cache_data(ttl=43200, show_spinner=False)(lhb_codes_impl)
 
 def send_email_with_results(plan, mined, capital, leftover, cold, idx_close, idx_ma60):
     """用网页端已算好的选股结果直接发邮件，不重跑选股流程（v1.8 新增）。
-    渲染/发送复用 daily_push；daily_push 模块级要读 QQ_EMAIL/QQ_AUTH_CODE 环境变量，
-    故延迟到此处 import 并整体 try/except，未配置或发送失败绝不影响页面展示。
+    邮箱配置支持两种来源：环境变量（本地/Actions）或 st.secrets（Streamlit Cloud 后台 Secrets）。
+    渲染/发送复用 daily_push；daily_push 模块级要读 QQ_EMAIL/QQ_AUTH_CODE，
+    故先注入 os.environ 再延迟 import，整体 try/except，失败绝不影响页面展示。
     返回 (是否成功, 提示信息)。"""
-    if not (os.environ.get("QQ_EMAIL") and os.environ.get("QQ_AUTH_CODE")):
-        return False, "未配置 QQ_EMAIL / QQ_AUTH_CODE 环境变量，跳过发邮件"
     try:
+        email = os.environ.get("QQ_EMAIL") or st.secrets.get("QQ_EMAIL", "")
+        auth = os.environ.get("QQ_AUTH_CODE") or st.secrets.get("QQ_AUTH_CODE", "")
+    except Exception:
+        email, auth = os.environ.get("QQ_EMAIL", ""), os.environ.get("QQ_AUTH_CODE", "")
+    if not (email and auth):
+        return False, "未配置 QQ_EMAIL / QQ_AUTH_CODE（Streamlit Cloud 需在应用 Settings → Secrets 里添加），跳过发邮件"
+    try:
+        os.environ.setdefault("QQ_EMAIL", email)
+        os.environ.setdefault("QQ_AUTH_CODE", auth)
         import daily_push
         d = {
             "date": pd.Timestamp.now().strftime("%Y-%m-%d"),
