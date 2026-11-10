@@ -14,14 +14,29 @@
 """
 import numpy as np
 import pandas as pd
+from pathlib import Path
+
+# ========== 自动进化配置（每天 evolution.py 可能改这个文件） ==========
+_CFG_PATH = Path(__file__).parent / "strategy_config.json"
+def _cfg() -> dict:
+    if _CFG_PATH.exists():
+        try:
+            return json.load(open(_CFG_PATH, encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+import json  # noqa: E402
 
 FACTOR_COLS = ["动量20", "波动率20", "换手20", "EP", "BP"]
-IC_MIN = 0.03        # 20日IC均值的有效性门槛
+# 以下参数优先读 strategy_config.json，读不到用默认值（v1.4 上线时的硬编码）
+IC_MIN = float(_cfg().get("因子", {}).get("IC门槛", 0.03))
 IC_AVG_N = 20        # 用最近20个交易日的截面IC均值定权（降权重抖动）
 FWD_DAYS = 5         # 检验因子对未来5日收益的预测力
 WARMUP = 60          # 前60根K线不参与采样（保证因子窗口完整）
 MIN_XSEC = 15        # 单个交易日截面至少15只股票才算IC
 MIN_IND = 3          # 同行业至少3只才做组内中性化，否则退回全截面
+DECAY_DAYS = int(_cfg().get("因子", {}).get("衰减天数", 30))
 
 
 def factor_series(h: pd.DataFrame, pe: float = None, pb: float = None) -> pd.DataFrame:

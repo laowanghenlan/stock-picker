@@ -48,9 +48,27 @@ def blend_ratios(n_actual: int) -> tuple[float, float]:
     return 0.3, 0.7
 
 
-# ===== 策略熔断（实盘风控的最后一道防线） =====
-CB_LEVELS = {0: "正常", 1: "降半仓（连亏5笔）", 2: "停策略（连亏10笔）",
-             3: "降半仓（累计回撤超15%）", 4: "停策略（累计回撤超25%）"}
+# ===== 策略熔断（实盘风控的最后一道防线，阈值从 strategy_config.json 读） =====
+from pathlib import Path as _Path
+import json as _json
+_CFG = {}
+try:
+    _p = _Path(__file__).parent / "strategy_config.json"
+    if _p.exists():
+        _CFG = _json.load(open(_p, encoding="utf-8"))
+except Exception:
+    pass
+_risk_cfg = _CFG.get("风控", {})
+_CB_LOSS_STOP = int(_risk_cfg.get("熔断连亏停", 10))
+_CB_LOSS_HALF = int(_risk_cfg.get("熔断连亏降", 5))
+_CB_DD_STOP = float(_risk_cfg.get("熔断回撤停", 0.25)) * 100
+_CB_DD_HALF = float(_risk_cfg.get("熔断回撤降", 0.15)) * 100
+
+CB_LEVELS = {0: "正常",
+             1: f"降半仓（连亏{_CB_LOSS_HALF}笔）",
+             2: f"停策略（连亏{_CB_LOSS_STOP}笔）",
+             3: f"降半仓（累计回撤超{_CB_DD_HALF:.0f}%）",
+             4: f"停策略（累计回撤超{_CB_DD_STOP:.0f}%）"}
 
 
 def circuit_breaker(review_df: pd.DataFrame) -> tuple[int, str, dict]:
@@ -84,13 +102,13 @@ def circuit_breaker(review_df: pd.DataFrame) -> tuple[int, str, dict]:
     diag["累计盈亏%"] = round(cum_ret, 2)
     diag["累计回撤%"] = round(dd, 2)
 
-    if consec_loss >= 10:
+    if consec_loss >= _CB_LOSS_STOP:
         return 2, f"连亏 {consec_loss} 笔，触发停策略（建议手动检查）", diag
-    if consec_loss >= 5:
+    if consec_loss >= _CB_LOSS_HALF:
         return 1, f"连亏 {consec_loss} 笔，触发降半仓", diag
-    if dd <= -25:
+    if dd <= -_CB_DD_STOP:
         return 4, f"累计回撤 {dd:+.1f}%，触发停策略（建议手动检查）", diag
-    if dd <= -15:
+    if dd <= -_CB_DD_HALF:
         return 3, f"累计回撤 {dd:+.1f}%，触发降半仓", diag
     return 0, f"正常（连亏{consec_loss}笔，累计{cum_ret:+.1f}%，最大回撤{dd:+.1f}%）", diag
 

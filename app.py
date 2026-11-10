@@ -148,6 +148,66 @@ def auto_pick_count(capital: float) -> int:
     return max(1, int(capital // 1000))
 
 
+# ========== 预写死功能（evolution.py 到阈值自动开） ==========
+def _correlation_filter(ranked: pd.DataFrame, spot: pd.DataFrame,
+                         threshold: float = 0.8) -> pd.DataFrame:
+    """相关性过滤：候选股间相关性 > threshold 的只留排名更高的一只。
+    注：用日线收盘价 Spearman 相关（免费数据能拿到）。
+    evolution.py 在实盘 ≥ 30 笔时自动把 cfg 相关性过滤.启用 改成 True。"""
+    try:
+        codes = ranked["代码"].head(20).tolist()
+        close_mat = pd.DataFrame()
+        for c in codes:
+            h = spot[spot["代码"] == c].sort_values("交易日")
+            col = h.set_index("交易日")["收盘"].rename(c)
+            if len(col) >= 60:
+                close_mat[c] = col
+        if close_mat.shape[1] < 2:
+            return ranked
+        corr = close_mat.corr().abs()
+        keep = set(ranked["代码"].head(1).tolist())
+        for c in ranked["代码"].iloc[1:].head(19):
+            if c not in corr.columns:
+                keep.add(c); continue
+            if any(corr.loc[c, k] >= threshold for k in keep if k in corr.columns):
+                continue  # 和已保留的高度相关，跳过
+            keep.add(c)
+        return ranked[ranked["代码"].isin(keep)].reset_index(drop=True)
+    except Exception:
+        return ranked
+
+
+def _kelly_position(ranked: pd.DataFrame, capital: float,
+                   min_wr: float = 0.55, max_ratio: float = 0.15) -> pd.Series:
+    """凯利公式仓位分配。f = (bp - q)/b，f 过大时按 max_ratio 封顶。
+    b=平均赔率（平均盈亏%的绝对值比），p=胜率，q=1-p。
+    evolution.py 在实盘 ≥ 30 笔时自动把 cfg 凯利公式.启用 改成 True。
+    未启用时 best_plan 仍用原来的等额分配。"""
+    try:
+        if "胜率" not in ranked.columns or "扣费总收益" not in ranked.columns:
+            return pd.Series(1.0, index=ranked.index)
+        p = float(ranked["胜率"].clip(0, 1).mean())
+        avg_gain = ranked[ranked["扣费总收益"] > 0]["扣费总收益"].mean()
+        avg_loss = abs(ranked[ranked["扣费总收益"] < 0]["扣费总收益"].mean()) + 1e-9
+        b = avg_gain / avg_loss
+        if p < min_wr or b <= 1e-6:
+            return pd.Series(1.0, index=ranked.index)  # 胜率不够降级等额
+        f = (b * p - (1 - p)) / b
+        f = max(0.01, min(max_ratio, f))  # 封顶防过度集中
+        # 各票按预期收益加权分 f 的预算
+        weights = ranked["扣费总收益"].clip(lower=0).abs()
+        if weights.sum() < 1e-6:
+            return pd.Series(1.0, index=ranked.index)
+        alloc = (weights / weights.sum()) * f
+        # 归一化让总比例等于 f（或等额，取大的那个）
+        total = alloc.sum()
+        if total < 0.05:
+            return pd.Series(1.0, index=ranked.index)
+        return alloc
+    except Exception:
+        return pd.Series(1.0, index=ranked.index)
+
+
 def best_plan(ranked: pd.DataFrame, capital: float):
     """只数不写死：枚举 1~min(候选数,20)，选'预期总收益−买卖全部摩擦成本'最大的方案。
     预期收益 = 各票扣费回测收益% × 实际买入金额；摩擦含最低5元佣金
@@ -171,9 +231,39 @@ def best_plan(ranked: pd.DataFrame, capital: float):
 MIN_PRICE = 2.0         # 股价下限：避开1元股退市风险区
 CANDIDATES = 15         # 初筛后进入回测验证的候选数量
 PICKS = 3               # 最终输出股票数（兜底默认值，实际只数由 auto_pick_count(本金) 决定）
-STOP_LOSS_PCT = 0.05    # 止损线：跌5%必须卖
-TAKE_PROFIT_PCT = 0.10  # 止盈参考：涨10%考虑落袋
 HISTORY_DAYS = 500      # 回测用的历史天数
+
+# ========== 自动进化配置（evolution.py 可能改 strategy_config.json） ==========
+_CFG_PATH = Path(__file__).parent / "strategy_config.json"
+def _cfg() -> dict:
+    if _CFG_PATH.exists():
+        try:
+            return json.load(open(_CFG_PATH, encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+import json  # noqa: E402
+
+_risk = _cfg().get("风控", {})
+STOP_LOSS_PCT = float(_risk.get("止损%", 0.05))
+TAKE_PROFIT_PCT = float(_risk.get("止盈%", 0.10))
+STOP_LOSS_PCT = STOP_LOSS_PCT  # 用 config 的覆盖
+STOP_LOSS_PCT = STOP_LOSS_PCT  # 保持变量名不变（下游引用）
+# 熔断阈值
+_cfg_fus = _risk
+FUSE_LOSS_STOP = int(_cfg_fus.get("熔断连亏停", 10))
+FUSE_LOSS_HALF = int(_cfg_fus.get("熔断连亏降", 5))
+FUSE_DD_STOP = float(_cfg_fus.get("熔断回撤停", 0.25))
+FUSE_DD_HALF = float(_cfg_fus.get("熔断回撤降", 0.15))
+
+# 仓位管理开关（30 笔后 evolution.py 自动开）
+_cfg_pos = _cfg().get("仓位管理", {})
+_USE_CORR_FILTER = bool(_cfg_pos.get("相关性过滤", {}).get("启用", False))
+_CORR_THRESHOLD = float(_cfg_pos.get("相关性过滤", {}).get("阈值", 0.80))
+_USE_KELLY = bool(_cfg_pos.get("凯利公式", {}).get("启用", False))
+_KELLY_MIN_WR = float(_cfg_pos.get("凯利公式", {}).get("最小胜率", 0.55))
+_KELLY_MAX_RATIO = float(_cfg_pos.get("凯利公式", {}).get("最大仓位比例", 0.15))
 
 # ---------------- 历史推荐复盘（打开页面自动执行，无需点击） ----------------
 REVIEW_FILE = Path(__file__).parent / "推送记录.csv"   # GitHub Actions 每日推送留档
@@ -564,13 +654,35 @@ def pick_top3(res: pd.DataFrame, n: int = PICKS) -> pd.DataFrame:
 
 def allocate(picks: pd.DataFrame, budget0: float) -> pd.DataFrame:
     """第四步：把本金尽量买满。
-    均摊目标 = 剩余预算 / 剩余只数；每只按目标买100股的整数倍，
-    买完后剩余的钱自动顺延给下一只，最后一只尽量把预算花完。"""
+    默认均摊目标 = 剩余预算 / 剩余只数；
+    若 strategy_config.json 里 凯利公式.启用=true（实盘 ≥30 笔自动开），
+    则按凯利权重加权分配，胜率高/赔率大的票拿更多预算。
+    每只按目标买100股的整数倍，买完后剩余的钱自动顺延给下一只，最后一只尽量把预算花完。"""
+    # ===== 凯利公式加权（30 笔后 evolution.py 自动开） =====
+    cfg_pos = _cfg().get("仓位管理", {}) if "_cfg" in dir() else {}
+    use_kelly = bool(cfg_pos.get("凯利公式", {}).get("启用", False))
+    kelly_weights = None
+    if use_kelly and len(picks) > 1:
+        try:
+            # best_plan 传进来的 picks 里有扣费总收益和胜率
+            kw = _kelly_position(picks, budget0,
+                                 min_wr=float(cfg_pos.get("凯利公式", {}).get("最小胜率", 0.55)),
+                                 max_ratio=float(cfg_pos.get("凯利公式", {}).get("最大仓位比例", 0.15)))
+            if not (kw == 1.0).all():
+                kelly_weights = kw.values  # np.array，每只一个比例
+        except Exception:
+            pass
+
     plan, budget = [], budget0
     n = len(picks)
     for i, (_, r) in enumerate(picks.iterrows()):
         price = r["最新价"]
-        target = budget / (n - i)                         # 均摊到当前这只的目标金额
+        if kelly_weights is not None:
+            # 凯利加权：按预算 × 权重 / 剩余权重和
+            w_remain = float(kelly_weights[i:].sum()) + 1e-9
+            target = budget * float(kelly_weights[i]) / w_remain
+        else:
+            target = budget / (n - i)                         # 均摊到当前这只的目标金额
         shares = int(target / price / 100) * 100          # 100股整数倍
         if shares == 0:
             shares = 100                                  # 至少买1手，否则这笔钱就浪费了
@@ -722,6 +834,12 @@ if run:
     elif cb_level >= 1:
         st.warning("🟡 已触发降半仓！建议实际买入金额为页面显示的一半。")
 
+    # ---- 相关性过滤（30 笔后 evolution.py 自动开） ----
+    if _USE_CORR_FILTER:
+        try:
+            ranked = _correlation_filter(ranked, get_spot(), threshold=_CORR_THRESHOLD)
+        except Exception:
+            pass
     plan, n_final = best_plan(ranked, float(capital))
     leftover = float(capital) - float(plan["投入(含佣金)"].sum())
 
