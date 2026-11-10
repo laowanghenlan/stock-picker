@@ -127,15 +127,15 @@ def fetch_fundamental(code: str, max_history_quarters: int = 8) -> pd.DataFrame:
             continue
 
         row = {"代码": code, "报告期": f"{year}Q{q}"}
-        # ROE（平均）
+        # ROE/净利率：baostock 返回的已是小数比例（0.049 即 4.9%），不能再除以 100
         if not profit.empty:
-            row["ROE"] = pd.to_numeric(profit["roeAvg"], errors="coerce").iloc[0] / 100 if "roeAvg" in profit.columns else None
-            row["净利率"] = pd.to_numeric(profit["npMargin"], errors="coerce").iloc[0] / 100 if "npMargin" in profit.columns else None
+            row["ROE"] = pd.to_numeric(profit["roeAvg"], errors="coerce").iloc[0] if "roeAvg" in profit.columns else None
+            row["净利率"] = pd.to_numeric(profit["npMargin"], errors="coerce").iloc[0] if "npMargin" in profit.columns else None
             row["EPS_TTM"] = pd.to_numeric(profit["epsTTM"], errors="coerce").iloc[0] if "epsTTM" in profit.columns else None
-        # 增速
+        # 增速：同样已是小数比例
         if not growth.empty:
-            row["净利润增速"] = pd.to_numeric(growth["YOYNI"], errors="coerce").iloc[0] / 100 if "YOYNI" in growth.columns else None
-            row["营收增速"] = pd.to_numeric(growth["YOYPNI"], errors="coerce").iloc[0] / 100 if "YOYPNI" in growth.columns else None
+            row["净利润增速"] = pd.to_numeric(growth["YOYNI"], errors="coerce").iloc[0] if "YOYNI" in growth.columns else None
+            row["营收增速"] = pd.to_numeric(growth["YOYPNI"], errors="coerce").iloc[0] if "YOYPNI" in growth.columns else None
 
         # pubDate（发布日期很重要——因子只能用发布日之后的行情，避免前视偏差）
         pub = profit.get("pubDate", growth.get("pubDate"))
@@ -148,7 +148,8 @@ def fetch_fundamental(code: str, max_history_quarters: int = 8) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     out = pd.DataFrame(rows)
-    out["报告期"] = pd.to_datetime(out["报告期"].str.replace("Q", "-")).dt.to_period("Q")
+    # 报告期统一转成季度索引（注意：不能先转成日期，"2025Q4" 会被误读为 2025 年 4 月）
+    out["报告期"] = pd.PeriodIndex(out["报告期"].astype(str).tolist(), freq="Q")
     out["pubDate"] = pd.to_datetime(out["pubDate"], errors="coerce")
     return out.sort_values("pubDate").reset_index(drop=True)
 
@@ -196,11 +197,11 @@ def fetch_fundamental_batch(codes: list[str], year: int | None = None,
 
         row = {"代码": code, "报告期": f"{year}Q{q}"}
         if not profit.empty:
-            row["ROE"] = pd.to_numeric(profit["roeAvg"], errors="coerce").iloc[0] / 100 if "roeAvg" in profit.columns else None
-            row["净利率"] = pd.to_numeric(profit["npMargin"], errors="coerce").iloc[0] / 100 if "npMargin" in profit.columns else None
+            row["ROE"] = pd.to_numeric(profit["roeAvg"], errors="coerce").iloc[0] if "roeAvg" in profit.columns else None
+            row["净利率"] = pd.to_numeric(profit["npMargin"], errors="coerce").iloc[0] if "npMargin" in profit.columns else None
         if not growth.empty:
-            row["净利润增速"] = pd.to_numeric(growth["YOYNI"], errors="coerce").iloc[0] / 100 if "YOYNI" in growth.columns else None
-            row["营收增速"] = pd.to_numeric(growth["YOYPNI"], errors="coerce").iloc[0] / 100 if "YOYPNI" in growth.columns else None
+            row["净利润增速"] = pd.to_numeric(growth["YOYNI"], errors="coerce").iloc[0] if "YOYNI" in growth.columns else None
+            row["营收增速"] = pd.to_numeric(growth["YOYPNI"], errors="coerce").iloc[0] if "YOYPNI" in growth.columns else None
         results.append(row)
 
         if (i + 1) % 50 == 0:

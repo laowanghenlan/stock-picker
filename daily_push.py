@@ -66,7 +66,7 @@ def _collect() -> dict:
         d["note"] = "今日初筛无符合条件的股票，空仓等待。"
         return d
 
-    cand = cand.nlargest(app.CANDIDATES, "成交额")        # 与web一致的候选策略
+    cand = cand.nlargest(app.CANDIDATES_PUSH, "成交额")   # 邮件端在后台跑，用更大的候选池
     res = app.verify_impl(cand, lambda p, t: None)        # 无界面，进度回调置空
     if len(res) == 0:
         d["note"] = "候选股历史数据不足，今日不建议买入。"

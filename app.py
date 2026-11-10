@@ -245,6 +245,11 @@ def _cfg() -> dict:
 
 import json  # noqa: E402
 
+# 候选池大小：只改 strategy_config.json 的「候选池」即可扩容，不用改代码
+_cfg_pool = _cfg().get("候选池", {})
+CANDIDATES = int(_cfg_pool.get("网页端", CANDIDATES))
+CANDIDATES_PUSH = int(_cfg_pool.get("邮件推送", CANDIDATES))
+
 _risk = _cfg().get("风控", {})
 STOP_LOSS_PCT = float(_risk.get("止损%", 0.05))
 TAKE_PROFIT_PCT = float(_risk.get("止盈%", 0.10))
