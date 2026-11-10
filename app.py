@@ -332,7 +332,7 @@ else:
 # ---------------- 我的持仓（每天自动体检：止损/止盈/利空） ----------------
 with st.expander("💼 我的持仓（填入代码和成本价，点选股时自动体检，自动保存）", expanded=True):
     holdings = st.data_editor(load_holdings(), num_rows="dynamic",
-                              use_container_width=True, key="holdings_editor",
+                              width='stretch', key="holdings_editor",
                               column_config={"代码": st.column_config.TextColumn("代码(6位)"),
                                              "成本价": st.column_config.NumberColumn("成本价", format="%.2f"),
                                              "股数": st.column_config.NumberColumn("股数", format="%d")})
@@ -349,7 +349,7 @@ with st.sidebar:
     # 股价上限：保证各只买100股也买得起；本金越大上限越宽，最高20元（保持低价股策略）
     MAX_PRICE = max(MIN_PRICE + 0.5, min(20.0, capital / (n_picks * 100) * 0.95))
     st.caption(f"行情快照时间：{spot_cache_time()}")
-    if st.button("🔄 刷新行情数据", use_container_width=True):
+    if st.button("🔄 刷新行情数据", width='stretch'):
         with st.spinner("正在联网刷新全市场行情，约1分钟..."):
             refresh_spot()
         st.rerun()
@@ -587,7 +587,7 @@ with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}条，自动更新�
 
 # ---------------- 页面：一个按钮 + 一张结果表 ----------------
 st.caption(f"本金 {capital:.0f} 元 · 只数由本金+预期收益自动优化 · 股价上限 {MAX_PRICE:.1f} 元 · 已内置手续费/止损/回测验证")
-run = st.button("🔍 今日选股", type="primary", use_container_width=True)
+run = st.button("🔍 今日选股", type="primary", width='stretch')
 
 if run:
     if market_cold and not force_run:
@@ -681,5 +681,5 @@ if run:
 
 
 # ---------- 版本号：手动维护，每次改完功能 bump 一次 ----------
-APP_VERSION = "v1.1"        # v1.0→v1.1 因子层v2（估值+行业中性+20日IC均值）+ 版本戳 + 样本量提示
+APP_VERSION = "v1.2"        # v1.1→v1.2 冒烟修复：列名bug + Streamlit use_container_width→width弃用替换
 
