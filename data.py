@@ -99,6 +99,58 @@ def get_history_impl(symbol: str, start: str, end: str) -> pd.DataFrame:
 get_history = st.cache_data(ttl=3600, show_spinner="正在下载历史K线数据...")(get_history_impl)
 
 
+_IND_FILE = Path(__file__).parent / "industry_cache.csv"
+_IND_TTL_DAYS = 30          # 行业归属很少变，缓存30天
+
+
+def _read_ind_cache() -> dict:
+    """读取代码→行业缓存，返回 {代码: 行业}；文件不存在或损坏返回空字典"""
+    if not _IND_FILE.exists():
+        return {}
+    try:
+        df = pd.read_csv(_IND_FILE, dtype={"代码": str})
+        return dict(zip(df["代码"].str.zfill(6), df["行业"].astype(str)))
+    except Exception:
+        return {}
+
+
+def _fetch_industry(code: str) -> str:
+    """抓取单只股票的行业（东财个股信息），失败返回空串"""
+    try:
+        info = ak.stock_individual_info_em(symbol=code)
+        hit = info[info["item"] == "行业"]
+        return str(hit.iloc[0]["value"]).strip() if len(hit) else ""
+    except Exception:
+        return ""
+
+
+def industry_map_impl(codes) -> dict:
+    """返回 {代码: 行业}。优先读磁盘缓存，只对缺失的代码联网补抓（并发5路）。
+    首次可能耗时几十秒，之后走缓存秒回；抓不到的代码不在结果里（上层按未分类处理）。"""
+    cache = _read_ind_cache()
+    if _IND_FILE.exists():
+        try:
+            stale = (time.time() - _IND_FILE.stat().st_mtime) > _IND_TTL_DAYS * 86400
+        except Exception:
+            stale = False
+        if stale:
+            cache = {}                      # 过期整体重抓
+    codes = [str(c).zfill(6) for c in codes]
+    todo = [c for c in codes if c not in cache]
+    if todo:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            for c, ind in zip(todo, pool.map(_fetch_industry, todo)):
+                if ind:
+                    cache[c] = ind
+        try:
+            pd.DataFrame({"代码": list(cache), "行业": list(cache.values())}).to_csv(
+                _IND_FILE, index=False, encoding="utf-8-sig")
+        except Exception:
+            pass                            # 写盘失败不影响本次使用
+    return {c: cache[c] for c in codes if c in cache}
+
+
 def find_code(keyword: str, spot: pd.DataFrame) -> pd.DataFrame:
     """按代码或名称关键字模糊搜索，最多返回20条"""
     kw = keyword.strip()

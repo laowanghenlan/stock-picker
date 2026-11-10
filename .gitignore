@@ -1,6 +1,7 @@
 # 不提交缓存与持仓数据
 spot_cache.csv
 spot_cache_*.csv
+industry_cache.csv
 持仓.csv
 __pycache__/
 *.pyc
