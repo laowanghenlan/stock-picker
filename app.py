@@ -678,3 +678,22 @@ if run:
         )
     st.caption("规则只有两条：止损必须执行；单只持有超过20个交易日仍不涨，也卖出。"
                "本结果为历史数据回测推演，不构成投资建议，盈亏自负。")
+
+
+# ---------- 版本戳：与远端 git commit 对齐，让用户能核对线上是否最新 ----------
+def _git_version() -> str:
+    try:
+        import subprocess
+        h = subprocess.check_output(
+            ["git", "-C", str(Path(__file__).parent), "rev-parse", "--short=7", "HEAD"],
+            stderr=subprocess.DEVNULL).decode().strip()[:7]
+        t = subprocess.check_output(
+            ["git", "-C", str(Path(__file__).parent), "log", "-1",
+             "--format=%ci"], stderr=subprocess.DEVNULL).decode().strip()[:10]
+        return f"v{h} ({t})"
+    except Exception:
+        return f"未知版（非git部署）"
+
+
+st.caption(f"🔖 版本 {_git_version()}  ·  对比远端：`git rev-parse --short HEAD` 或去仓库 https://github.com/laowanghenlan/stock-picker")
+

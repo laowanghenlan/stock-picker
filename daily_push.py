@@ -33,6 +33,17 @@ AUTH_CODE = os.environ["QQ_AUTH_CODE"]                  # QQ邮箱SMTP授权码�
 LOG_FILE = Path(__file__).parent / "推送记录.csv"       # 推送留档，供周末复盘用
 
 
+def _git_version() -> str:
+    try:
+        import subprocess
+        h = subprocess.check_output(
+            ["git", "-C", str(Path(__file__).parent), "rev-parse", "--short=7", "HEAD"],
+            stderr=subprocess.DEVNULL).decode().strip()[:7]
+        return h or "unknown"
+    except Exception:
+        return "unknown"
+
+
 def build_email() -> str:
     """跑一遍完整选股流程，生成邮件正文"""
     idx_close, idx_ma60, cold = app.market_temperature_impl()
@@ -108,6 +119,7 @@ def build_email() -> str:
               "https://stock-picker-mi5bntxj6x4fzrntgtzvko.streamlit.app/",
               f"💰 改本金（当前 {CAPITAL:.0f} 元；点链接 → 铅笔图标 → 改数字 → 绿色Commit，下次邮件生效）：",
               "https://github.com/laowanghenlan/stock-picker/blob/master/推荐设置.json",
+              f"🔖 版本 v{_git_version()}  ·  仓库：https://github.com/laowanghenlan/stock-picker",
               "（本邮件为量化程序自动生成，仅为历史数据推演，不构成投资建议）"]
     # 留档供周末复盘
     rec = plan[["代码", "名称", "现价", "买入股数"]].copy()
