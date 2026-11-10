@@ -8,6 +8,7 @@
 import base64
 import datetime as dt
 import json
+import os
 from pathlib import Path
 
 import akshare as ak
@@ -83,6 +84,75 @@ def lhb_codes_impl() -> set:
 
 # 缓存包装：web UI 一律调 lhb_codes；GitHub Actions 等裸运行环境请调 lhb_codes_impl
 lhb_codes = st.cache_data(ttl=43200, show_spinner=False)(lhb_codes_impl)
+
+
+def send_email_with_results(plan, mined, capital, leftover, cold, idx_close, idx_ma60):
+    """用网页端已算好的选股结果直接发邮件，不重跑选股流程（v1.8 新增）。
+    渲染/发送复用 daily_push；daily_push 模块级要读 QQ_EMAIL/QQ_AUTH_CODE 环境变量，
+    故延迟到此处 import 并整体 try/except，未配置或发送失败绝不影响页面展示。
+    返回 (是否成功, 提示信息)。"""
+    if not (os.environ.get("QQ_EMAIL") and os.environ.get("QQ_AUTH_CODE")):
+        return False, "未配置 QQ_EMAIL / QQ_AUTH_CODE 环境变量，跳过发邮件"
+    try:
+        import daily_push
+        d = {
+            "date": pd.Timestamp.now().strftime("%Y-%m-%d"),
+            "tag": "低温期" if cold else "回暖期",
+            "cold": bool(cold),
+            "idx_close": float(idx_close),
+            "idx_ma60": float(idx_ma60),
+            "capital": float(capital),
+            "mined": [{"名称": m["名称"], "代码": m["代码"], "标题": m["利空标题"]}
+                      for _, m in mined.iterrows()],
+            "plan": [{
+                "名称": p["名称"], "代码": p["代码"], "现价": float(p["现价"]),
+                "股数": int(p["买入股数"]), "投入": float(p["投入(含佣金)"]),
+                "盈利概率": float(p["盈利概率"]),
+                "止损": float(p["止损价(买入价×0.95)"]),
+                "止盈": float(p["止盈参考(买入价×1.10)"]),
+            } for _, p in plan.iterrows()],
+            "n_picks": len(plan),
+            "invest": float(plan["投入(含佣金)"].sum()),
+            "left": float(leftover),
+            "review": None,
+            "note": "",
+        }
+        # 复盘摘要：复用 app 的复盘逻辑，失败不影响发邮件
+        try:
+            rv = review_impl()
+            if rv is not None and len(rv) > 0:
+                done = rv[rv["_done"]]
+                if len(done) > 0:
+                    wins = int(done["结果"].isin(["🎯止盈", "🏁到期盈利"]).sum())
+                    r = {"done": int(len(done)), "winrate": float(wins / len(done) * 100),
+                         "pnl": float(rv["_盈亏额"].sum()), "bench": None, "excess": None,
+                         "rows": [], "conclusion": ""}
+                    if "同期沪深300%" in done.columns:
+                        d2 = done.dropna(subset=["同期沪深300%"])
+                        if len(d2) > 0:
+                            r["bench"] = float(d2["同期沪深300%"].mean())
+                            r["excess"] = float((d2["盈亏%"] - d2["同期沪深300%"]).mean())
+                    for _, r2 in rv.head(5).iterrows():
+                        r["rows"].append({"日期": str(r2["日期"]), "名称": r2["名称"],
+                                          "结果": r2["结果"], "盈亏%": float(r2["盈亏%"])})
+                    r["conclusion"] = review_conclusion(rv)
+                    d["review"] = r
+        except Exception:
+            pass
+        # 留档供周末复盘（与 daily_push._collect 相同的记录格式）
+        try:
+            rec = plan[["代码", "名称", "现价", "买入股数"]].copy()
+            rec.insert(0, "日期", d["date"])
+            rec["大盘标签"] = d["tag"]
+            log_file = Path(__file__).parent / "推送记录.csv"
+            rec.to_csv(log_file, mode="a", header=not log_file.exists(),
+                       index=False, encoding="utf-8-sig")
+        except Exception:
+            pass
+        daily_push.send(daily_push._render_text(d), daily_push._render_html(d))
+        return True, f"已发送到 {os.environ['QQ_EMAIL']}"
+    except Exception as e:
+        return False, f"发邮件失败：{type(e).__name__}: {e}"
 
 
 HOLDINGS_FILE = Path(__file__).parent / "持仓.csv"
@@ -941,6 +1011,15 @@ if run:
         )
     st.caption("规则只有两条：止损必须执行；单只持有超过20个交易日仍不涨，也卖出。"
                "本结果为历史数据回测推演，不构成投资建议，盈亏自负。")
+
+    # ---- 顺手把本次选股结果发邮件（复用已算好的数据，不重跑） ----
+    with st.spinner("正在发送邮件..."):
+        ok, msg = send_email_with_results(plan, mined, float(capital), leftover,
+                                          market_cold, idx_close, idx_ma60)
+    if ok:
+        st.success(f"📧 {msg}")
+    else:
+        st.caption(f"📧 邮件未发送：{msg}")
 
 
 # ---------- 版本号：手动维护，每次改完功能 bump 一次 ----------
