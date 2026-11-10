@@ -30,10 +30,13 @@ jobs:
           CAPITAL: '2200'
         run: python daily_push.py
 
-      - name: 推送记录回传仓库（供周末复盘）
+      - name: 🔬 自动进化引擎（检查实盘记录够不够触发30/60/100笔升级）
+        run: python evolution.py
+
+      - name: 推送记录 + 策略配置 回传仓库
         run: |
           git config user.name "stock-bot"
           git config user.email "stock-bot@local"
-          git add 推送记录.csv
-          git diff --cached --quiet || git commit -m "推送记录 $(date +%F)"
+          git add 推送记录.csv 因子历史IC.csv strategy_config.json
+          git diff --cached --quiet || git commit -m "每日留档 + 进化配置 $(date +%F)"
           git push
