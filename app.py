@@ -9,7 +9,13 @@ import base64
 import datetime as dt
 import json
 import os
+import sys
 from pathlib import Path
+
+# Streamlit 以 __main__ 运行本脚本：把 "app" 别名指向本模块自身，
+# 防止 import daily_push 时其模块级 import app 把本脚本再执行一遍（组件重复渲染报错）
+if __name__ == "__main__":
+    sys.modules["app"] = sys.modules["__main__"]
 
 import akshare as ak
 import pandas as pd
