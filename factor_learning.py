@@ -29,9 +29,73 @@ except Exception:
     FWD_DAYS = 5
 
 DECAY_DAYS = 30       # 连续 N 天 |IC| < IC_MIN → 判为衰减
-BLEND_HIST = 0.7      # 历史IC权重（更稳但滞后）
-BLEND_ACTUAL = 0.3    # 实盘IC权重（更准但样本小）
 MIN_ACTUAL_SAMPLES = 10   # 实盘IC至少要这么多推荐记录才算有效
+
+# ===== 动态融合比例：根据实盘样本量自动调整历史 vs 实盘权重 =====
+def blend_ratios(n_actual: int) -> tuple[float, float]:
+    """n_actual 是参与复盘反哺的实笔数。
+       < 30 笔: 历史 70% + 实盘 30%（保守，实盘样本小容易抖）
+     30~60 笔: 历史 50% + 实盘 50%（平衡）
+       > 60 笔: 历史 30% + 实盘 70%（信任实盘、历史只做锚点）
+       < MIN_ACTUAL_SAMPLES: (1.0, 0.0) 实盘样本不足，完全用历史
+    """
+    if n_actual < MIN_ACTUAL_SAMPLES:
+        return 1.0, 0.0
+    if n_actual < 30:
+        return 0.7, 0.3
+    if n_actual < 60:
+        return 0.5, 0.5
+    return 0.3, 0.7
+
+
+# ===== 策略熔断（实盘风控的最后一道防线） =====
+CB_LEVELS = {0: "正常", 1: "降半仓（连亏5笔）", 2: "停策略（连亏10笔）",
+             3: "降半仓（累计回撤超15%）", 4: "停策略（累计回撤超25%）"}
+
+
+def circuit_breaker(review_df: pd.DataFrame) -> tuple[int, str, dict]:
+    """返回 (熔断等级 0~4, 原因说明, 诊断dict)。完全不抛异常。"""
+    diag = {"连亏笔数": 0, "累计盈亏%": 0.0, "累计回撤%": 0.0}
+    if review_df is None or len(review_df) == 0:
+        return 0, "无复盘数据，熔断正常", diag
+    done = review_df[review_df.get("_done",
+                                   (review_df["结果"].str.startswith("🎯") |
+                                    review_df["结果"].str.startswith("🛑") |
+                                    review_df["结果"].str.startswith("🏁"))
+                                   if "结果" in review_df.columns else False)]
+    if len(done) < 5:
+        return 0, f"仅 {len(done)} 笔已出结果，熔断正常", diag
+
+    # 连亏计数（按日期升序，从最新往前找连续亏损）
+    by_date = done.sort_values("日期")
+    consec_loss = 0
+    for pnl in reversed(by_date["盈亏%"].values):
+        if float(pnl) < 0:
+            consec_loss += 1
+        else:
+            break
+    diag["连亏笔数"] = consec_loss
+
+    # 累计盈亏 + 最大回撤（简单算：累计盈亏从0开始逐日叠加，找峰值到谷底最大跌幅）
+    cum = (1 + by_date["盈亏%"] / 100).cumprod()
+    peak = cum.cummax()
+    dd = ((cum - peak) / peak).min() * 100  # 负数，数值越小回撤越大
+    cum_ret = (cum.iloc[-1] - 1) * 100
+    diag["累计盈亏%"] = round(cum_ret, 2)
+    diag["累计回撤%"] = round(dd, 2)
+
+    if consec_loss >= 10:
+        return 2, f"连亏 {consec_loss} 笔，触发停策略（建议手动检查）", diag
+    if consec_loss >= 5:
+        return 1, f"连亏 {consec_loss} 笔，触发降半仓", diag
+    if dd <= -25:
+        return 4, f"累计回撤 {dd:+.1f}%，触发停策略（建议手动检查）", diag
+    if dd <= -15:
+        return 3, f"累计回撤 {dd:+.1f}%，触发降半仓", diag
+    return 0, f"正常（连亏{consec_loss}笔，累计{cum_ret:+.1f}%，最大回撤{dd:+.1f}%）", diag
+
+
+
 
 # 因子历史IC存储路径（与推送记录.csv同目录，GitHub Actions每天自动commit回）
 BASE_DIR = Path(__file__).parent
@@ -85,26 +149,24 @@ def actual_ic_from_review(review_df: pd.DataFrame, picks_with_factors: pd.DataFr
     return out
 
 
-def blended_ic_weights(historical_ic: dict, actual_ic: dict, ic_ir: dict | None = None) -> tuple[dict, dict]:
-    """融合历史IC和实盘IC，返回 ({factor: blended_ic}, {factor: weight})。
+def blended_ic_weights(historical_ic: dict, actual_ic: dict, n_actual: int = 0) -> tuple[dict, dict, tuple[float, float]]:
+    """融合历史IC和实盘IC，返回 ({factor: blended_ic}, {factor: weight}, (hist_ratio, actual_ratio))。
 
-    - 历史IC（rolling 20日均值）占 70%，实盘IC占 30%
-    - 实盘IC样本不足 MIN_ACTUAL_SAMPLES 时自动退化成全历史IC（实际由上层决定是否调用）
-    - |blended| < IC_MIN 的因子剔除，剩余归一化
+    融合比例根据 n_actual（实笔数）自动动态调整（见 blend_ratios）。
     """
+    hist_r, act_r = blend_ratios(n_actual)
     blended = {}
     all_factors = set(list(historical_ic.keys()) + list(actual_ic.keys()))
     for f in all_factors:
         h = historical_ic.get(f, 0.0)
         a = actual_ic.get(f, 0.0)
-        # 如果只在一边出现，另一边按 0 算（保守）
-        blended[f] = BLEND_HIST * h + BLEND_ACTUAL * a
+        blended[f] = hist_r * h + act_r * a
 
     # 剔除 + 归一化（与 factors.ic_weights 口径一致）
     valid = {f: v for f, v in blended.items() if abs(v) >= IC_MIN}
     s = sum(abs(v) for v in valid.values())
     weights = {f: v / s for f, v in valid.items()} if s > 0 else {}
-    return blended, weights
+    return blended, weights, (hist_r, act_r)
 
 
 # =============================================================

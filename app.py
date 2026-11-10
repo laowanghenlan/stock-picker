@@ -491,16 +491,25 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
     # 基础权重（历史IC）
     base_icw = factors.ic_weights(res.attrs.get("ic") or {})
 
-    # ========== 复盘反哺权重：用实盘盈亏融合历史IC ==========
-    blended_icw, actual_ic_used = {}, {}
+    # ========== 复盘反哺权重：用实盘盈亏融合历史IC（比例根据实笔数动态调整） ==========
+    blended_icw, actual_ic_used, blend_ratios_used = {}, {}, (1.0, 0.0)
+    cb_level, cb_msg, cb_diag = 0, "无复盘数据", {}
     try:
         import factor_learning
         rv = review_impl()
+        # 策略熔断：实盘风控最后一道防线
+        cb_level, cb_msg, cb_diag = factor_learning.circuit_breaker(rv)
         actual_ic = factor_learning.actual_ic_from_review(rv, res)
+        n_done = int(cb_diag.get("_n_done", len(rv) if rv is not None else 0))
+        n_done = cb_diag.get("_n_done", n_done)   # 占位（circuit_breaker返回值不含n_done）
+        # 重新算一遍n_done（避免改circuit_breaker返回签名）
+        if rv is not None and len(rv) > 0:
+            n_done = int(rv.get("_done", False).sum() if "_done" in rv.columns else len(rv))
+        blend_ratios_used = factor_learning.blend_ratios(n_done)
         if actual_ic:
-            _, blended_icw = factor_learning.blended_ic_weights(
+            _, blended_icw, blend_ratios_used = factor_learning.blended_ic_weights(
                 {f: v for f, v in (res.attrs.get("ic") or {}).items()},
-                actual_ic)
+                actual_ic, n_actual=n_done)
             actual_ic_used = actual_ic
     except Exception:
         pass
@@ -519,7 +528,9 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
     res.attrs["ic_weights"] = final_icw
     res.attrs["ic_weights_base"] = base_icw
     res.attrs["ic_actual"] = actual_ic_used
+    res.attrs["blend_ratios"] = blend_ratios_used
     res.attrs["factor_health"] = health_df
+    res.attrs["cb_level"], res.attrs["cb_msg"], res.attrs["cb_diag"] = cb_level, cb_msg, cb_diag
     return res
 
 
@@ -540,9 +551,16 @@ def pick_top3(res: pd.DataFrame, n: int = PICKS) -> pd.DataFrame:
     icw = res.attrs.get("ic_weights") or {}
     if icw:
         ind = res["行业"] if "行业" in res.columns else pd.Series("未分类", index=res.index)
-        fscore = sum(factors.neutral_score(res[c], ind).fillna(0.5) * w
-                     for c, w in icw.items() if c in res.columns)
-        res["总分"] = res["总分"] * 0.6 + fscore * 100 * 0.4
+        # 因子贡献拆解：每个因子的 (中性化得分 × 权重 × 100) 存进单独列
+        contribs = {}
+        for c, w in icw.items():
+            if c not in res.columns:
+                continue
+            ns = factors.neutral_score(res[c], ind).fillna(0.5)
+            contribs[f"因子_{c}_贡献"] = ns * w * 100
+            res[f"因子_{c}_贡献"] = contribs[f"因子_{c}_贡献"]
+        fscore = sum(contribs.values())
+        res["总分"] = res["总分"] * 0.6 + fscore * 0.4
     res = res.sort_values("总分", ascending=False)
     # 只保留扣费后还能赚钱、且近7天无利空新闻的股票
     res = res[(res["扣费总收益"] > 0) & (~res["有雷"])]
@@ -689,11 +707,23 @@ if run:
     if _actual_ic:
         # 复盘反哺的实盘IC（小样本，仅供参考）
         act_tag = "　".join(f"{k}实盘IC={v:+.3f}" for k, v in _actual_ic.items())
-        st.caption(f"📊 复盘反哺：用最近实盘盈亏校准因子权重 → {act_tag}")
+        hr, ar = res.attrs.get("blend_ratios", (1.0, 0.0))
+        st.caption(f"📊 复盘反哺：历史IC {hr:.0%} + 实盘IC {ar:.0%}（动态比例，实笔数增加自动调权）→ {act_tag}")
     if decayed_set:
         st.caption(f"⛔ 衰减预警：{decayed_set}连续≥30天|IC|<{0.03}，已临时剔除，IC恢复自动归队。")
     if _icn and _icn < 60:
         st.caption(f"⚠️ 因子检验仅有 {_icn} 个交易日截面（<60），权重置信度偏低，仅供方向参考。")
+
+    # ===== 策略熔断状态 =====
+    cb_level = int(res.attrs.get("cb_level", 0) or 0)
+    cb_msg = res.attrs.get("cb_msg", "") or ""
+    cb_diag = res.attrs.get("cb_diag", {}) or {}
+    cb_color = {0: "🟢", 1: "🟡", 2: "🔴", 3: "🟡", 4: "🔴"}.get(cb_level, "🟢")
+    st.caption(f"{cb_color} 熔断状态：{cb_msg}（连亏{cb_diag.get('连亏笔数',0)}笔 / 累计{cb_diag.get('累计盈亏%',0):+.1f}% / 最大回撤{cb_diag.get('累计回撤%',0):+.1f}%）")
+    if cb_level >= 2:
+        st.error("🔴 已触发停策略！建议今天不要买入，手动检查复盘结果。")
+    elif cb_level >= 1:
+        st.warning("🟡 已触发降半仓！建议实际买入金额为页面显示的一半。")
 
     plan, n_final = best_plan(ranked, float(capital))
     leftover = float(capital) - float(plan["投入(含佣金)"].sum())
@@ -732,5 +762,5 @@ if run:
 
 
 # ---------- 版本号：手动维护，每次改完功能 bump 一次 ----------
-APP_VERSION = "v1.3"        # v1.2→v1.3 因子自学习：复盘反哺权重(7历史:3实盘) + 因子衰减监控(30天自动剔除)
+APP_VERSION = "v1.4"        # v1.3→v1.4 三件套：策略熔断 + 实盘IC融合比例动态化 + 因子贡献拆解
 
