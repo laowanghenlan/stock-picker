@@ -6,3 +6,6 @@ plotly==7.1.0
 numpy==2.5.4
 requests==2.34.2
 baostock==0.9.4
+# v1.8 均值方差仓位优化（Linux 上 cvxpy 正常工作；Windows 本地若不兼容会自动降级 numpy 闭式解）
+PyPortfolioOpt==1.6.0
+cvxpy==1.5.3

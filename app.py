@@ -148,12 +148,17 @@ def auto_pick_count(capital: float) -> int:
     return max(1, int(capital // 1000))
 
 
-# ========== 预写死功能（evolution.py 到阈值自动开） ==========
+# ========== 预写死功能（v1.8 全开，置信度折扣在调用处应用） ==========
 def _correlation_filter(ranked: pd.DataFrame, spot: pd.DataFrame,
-                         threshold: float = 0.8) -> pd.DataFrame:
+                         threshold: float = 0.8, n_done: int = 0) -> pd.DataFrame:
     """相关性过滤：候选股间相关性 > threshold 的只留排名更高的一只。
     注：用日线收盘价 Spearman 相关（免费数据能拿到）。
-    evolution.py 在实盘 ≥ 30 笔时自动把 cfg 相关性过滤.启用 改成 True。"""
+    v1.8 置信度折扣：n_done < 置信度阈值 时，threshold 向上抬（更宽松，少删票），
+    避免小样本下相关系数不稳定而误删好票。
+      实际阈值 = threshold + (1 - confidence) * (0.95 - threshold)
+      confidence=0 → 阈值 0.95（几乎不删）；confidence=1 → 原 threshold。"""
+    conf = _confidence(n_done, _CORR_CONF_TH)
+    actual_threshold = threshold + (1 - conf) * (0.95 - threshold)
     try:
         codes = ranked["代码"].head(20).tolist()
         close_mat = pd.DataFrame()
@@ -169,7 +174,7 @@ def _correlation_filter(ranked: pd.DataFrame, spot: pd.DataFrame,
         for c in ranked["代码"].iloc[1:].head(19):
             if c not in corr.columns:
                 keep.add(c); continue
-            if any(corr.loc[c, k] >= threshold for k in keep if k in corr.columns):
+            if any(corr.loc[c, k] >= actual_threshold for k in keep if k in corr.columns):
                 continue  # 和已保留的高度相关，跳过
             keep.add(c)
         return ranked[ranked["代码"].isin(keep)].reset_index(drop=True)
@@ -178,11 +183,14 @@ def _correlation_filter(ranked: pd.DataFrame, spot: pd.DataFrame,
 
 
 def _kelly_position(ranked: pd.DataFrame, capital: float,
-                   min_wr: float = 0.55, max_ratio: float = 0.15) -> pd.Series:
+                   min_wr: float = 0.55, max_ratio: float = 0.15,
+                   n_done: int = 0) -> pd.Series:
     """凯利公式仓位分配。f = (bp - q)/b，f 过大时按 max_ratio 封顶。
     b=平均赔率（平均盈亏%的绝对值比），p=胜率，q=1-p。
-    evolution.py 在实盘 ≥ 30 笔时自动把 cfg 凯利公式.启用 改成 True。
-    未启用时 best_plan 仍用原来的等额分配。"""
+    v1.8 置信度折扣：n_done < 置信度阈值 时，f 乘以 confidence，
+    样本越少仓位越保守，避免小样本胜率噪声导致过度集中。
+      confidence=0 → f 几乎为 0（接近等额）；confidence=1 → 原凯利。"""
+    conf = _confidence(n_done, _KELLY_CONF_TH)
     try:
         if "胜率" not in ranked.columns or "扣费总收益" not in ranked.columns:
             return pd.Series(1.0, index=ranked.index)
@@ -193,7 +201,7 @@ def _kelly_position(ranked: pd.DataFrame, capital: float,
         if p < min_wr or b <= 1e-6:
             return pd.Series(1.0, index=ranked.index)  # 胜率不够降级等额
         f = (b * p - (1 - p)) / b
-        f = max(0.01, min(max_ratio, f))  # 封顶防过度集中
+        f = max(0.01, min(max_ratio, f)) * conf  # 置信度折扣
         # 各票按预期收益加权分 f 的预算
         weights = ranked["扣费总收益"].clip(lower=0).abs()
         if weights.sum() < 1e-6:
@@ -212,11 +220,14 @@ def best_plan(ranked: pd.DataFrame, capital: float):
     """只数不写死：枚举 1~min(候选数,20)，选'预期总收益−买卖全部摩擦成本'最大的方案。
     预期收益 = 各票扣费回测收益% × 实际买入金额；摩擦含最低5元佣金
     （本金越小固定佣金越吃亏，最优只数自然越少；候选越多收益越高，只数自然越多）。
+    v1.8: 从 ranked.attrs 取 n_done / hists，传给 allocate 做均值方差优化。
     返回 (买入方案, 最优只数)。"""
     ret_map = ranked.set_index("代码")["扣费总收益"]
+    n_done = int(ranked.attrs.get("n_done", 0) or 0)
+    hists = ranked.attrs.get("hists") or {}
     best_df, best_n, best_net = None, 0, -1e18
     for n in range(1, min(len(ranked), 20) + 1):
-        plan, _left = allocate(ranked.head(n), capital)
+        plan, _left = allocate(ranked.head(n), capital, n_done=n_done, hists=hists)
         amt = plan["买入股数"] * plan["现价"]
         gross = float((amt * plan["代码"].map(ret_map) / 100).sum())
         buy_fee = float((plan["投入(含佣金)"] - amt).sum())
@@ -262,13 +273,24 @@ FUSE_LOSS_HALF = int(_cfg_fus.get("熔断连亏降", 5))
 FUSE_DD_STOP = float(_cfg_fus.get("熔断回撤停", 0.25))
 FUSE_DD_HALF = float(_cfg_fus.get("熔断回撤降", 0.15))
 
-# 仓位管理开关（30 笔后 evolution.py 自动开）
+# 仓位管理开关（v1.8 全开 + 置信度折扣：功能从第一天启用，效果按实笔数打折）
 _cfg_pos = _cfg().get("仓位管理", {})
 _USE_CORR_FILTER = bool(_cfg_pos.get("相关性过滤", {}).get("启用", False))
 _CORR_THRESHOLD = float(_cfg_pos.get("相关性过滤", {}).get("阈值", 0.80))
+_CORR_CONF_TH = int(_cfg_pos.get("相关性过滤", {}).get("置信度阈值", 30))
 _USE_KELLY = bool(_cfg_pos.get("凯利公式", {}).get("启用", False))
 _KELLY_MIN_WR = float(_cfg_pos.get("凯利公式", {}).get("最小胜率", 0.55))
 _KELLY_MAX_RATIO = float(_cfg_pos.get("凯利公式", {}).get("最大仓位比例", 0.15))
+_KELLY_CONF_TH = int(_cfg_pos.get("凯利公式", {}).get("置信度阈值", 30))
+_USE_MV_OPT = bool(_cfg_pos.get("均值方差优化", {}).get("启用", False))
+_MV_CONF_TH = int(_cfg_pos.get("均值方差优化", {}).get("置信度阈值", 30))
+
+
+def _confidence(n_done: int, threshold: int) -> float:
+    """置信度 = min(1.0, n_done / threshold)。样本不足时效果向保守方向靠拢。"""
+    if threshold <= 0:
+        return 1.0
+    return max(0.0, min(1.0, n_done / threshold))
 
 # ---------------- 历史推荐复盘（打开页面自动执行，无需点击） ----------------
 REVIEW_FILE = Path(__file__).parent / "推送记录.csv"   # GitHub Actions 每日推送留档
@@ -596,6 +618,7 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
     # ========== 复盘反哺权重：用实盘盈亏融合历史IC（比例根据实笔数动态调整） ==========
     blended_icw, actual_ic_used, blend_ratios_used = {}, {}, (1.0, 0.0)
     cb_level, cb_msg, cb_diag = 0, "无复盘数据", {}
+    n_done = 0  # v1.8: 已结算实盘笔数，用于置信度折扣
     try:
         import factor_learning
         rv = review_impl()
@@ -633,6 +656,8 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
     res.attrs["blend_ratios"] = blend_ratios_used
     res.attrs["factor_health"] = health_df
     res.attrs["cb_level"], res.attrs["cb_msg"], res.attrs["cb_diag"] = cb_level, cb_msg, cb_diag
+    res.attrs["n_done"] = int(n_done)          # v1.8: 置信度折扣用
+    res.attrs["hists"] = hists                  # v1.8: 均值方差优化用
     return res
 
 
@@ -669,24 +694,43 @@ def pick_top3(res: pd.DataFrame, n: int = PICKS) -> pd.DataFrame:
     return res.head(n)
 
 
-def allocate(picks: pd.DataFrame, budget0: float) -> pd.DataFrame:
+def allocate(picks: pd.DataFrame, budget0: float,
+             n_done: int = 0, hists: dict | None = None) -> pd.DataFrame:
     """第四步：把本金尽量买满。
-    默认均摊目标 = 剩余预算 / 剩余只数；
-    若 strategy_config.json 里 凯利公式.启用=true（实盘 ≥30 笔自动开），
-    则按凯利权重加权分配，胜率高/赔率大的票拿更多预算。
+    v1.8 仓位分配优先级：均值方差优化 > 凯利公式 > 等额分配
+      1. 均值方差优化（PyPortfolioOpt 或 numpy 闭式解）：按 max_sharpe 给权重
+      2. 凯利公式：胜率高/赔率大的票拿更多预算
+      3. 等额分配：兜底
+    三者都带置信度折扣（样本不足时向等额靠拢）。
     每只按目标买100股的整数倍，买完后剩余的钱自动顺延给下一只，最后一只尽量把预算花完。"""
-    # ===== 凯利公式加权（30 笔后 evolution.py 自动开） =====
     cfg_pos = _cfg().get("仓位管理", {}) if "_cfg" in dir() else {}
-    use_kelly = bool(cfg_pos.get("凯利公式", {}).get("启用", False))
-    kelly_weights = None
-    if use_kelly and len(picks) > 1:
+    hists = hists or {}
+
+    # ===== 1. 均值方差优化（PyPortfolioOpt / numpy 兜底） =====
+    opt_weights = None
+    if _USE_MV_OPT and len(picks) > 1:
         try:
-            # best_plan 传进来的 picks 里有扣费总收益和胜率
+            import portfolio_optimizer as po
+            codes = picks["代码"].astype(str).str.zfill(6).tolist()
+            exp_ret = {c: float(picks.loc[picks["代码"].astype(str).str.zfill(6) == c, "扣费总收益"].iloc[0]) / 100
+                       for c in codes if len(picks.loc[picks["代码"].astype(str).str.zfill(6) == c]) > 0}
+            w, method = po.optimize_weights(codes, hists, exp_ret, n_done=n_done)
+            if w:
+                # 按 picks 的顺序对齐权重
+                opt_weights = [w.get(c, 0.0) for c in codes]
+        except Exception:
+            opt_weights = None
+
+    # ===== 2. 凯利公式（均值方差失败时降级） =====
+    kelly_weights = None
+    if opt_weights is None and _USE_KELLY and len(picks) > 1:
+        try:
             kw = _kelly_position(picks, budget0,
                                  min_wr=float(cfg_pos.get("凯利公式", {}).get("最小胜率", 0.55)),
-                                 max_ratio=float(cfg_pos.get("凯利公式", {}).get("最大仓位比例", 0.15)))
+                                 max_ratio=float(cfg_pos.get("凯利公式", {}).get("最大仓位比例", 0.15)),
+                                 n_done=n_done)
             if not (kw == 1.0).all():
-                kelly_weights = kw.values  # np.array，每只一个比例
+                kelly_weights = kw.values
         except Exception:
             pass
 
@@ -694,7 +738,11 @@ def allocate(picks: pd.DataFrame, budget0: float) -> pd.DataFrame:
     n = len(picks)
     for i, (_, r) in enumerate(picks.iterrows()):
         price = r["最新价"]
-        if kelly_weights is not None:
+        if opt_weights is not None:
+            # 均值方差权重：按预算 × 权重 / 剩余权重和
+            w_remain = float(sum(opt_weights[i:])) + 1e-9
+            target = budget * float(opt_weights[i]) / w_remain
+        elif kelly_weights is not None:
             # 凯利加权：按预算 × 权重 / 剩余权重和
             w_remain = float(kelly_weights[i:].sum()) + 1e-9
             target = budget * float(kelly_weights[i]) / w_remain
@@ -851,10 +899,12 @@ if run:
     elif cb_level >= 1:
         st.warning("🟡 已触发降半仓！建议实际买入金额为页面显示的一半。")
 
-    # ---- 相关性过滤（30 笔后 evolution.py 自动开） ----
+    # ---- 相关性过滤（v1.8 全开，带置信度折扣） ----
     if _USE_CORR_FILTER:
         try:
-            ranked = _correlation_filter(ranked, get_spot(), threshold=_CORR_THRESHOLD)
+            _n_done = int(ranked.attrs.get("n_done", 0) or 0)
+            ranked = _correlation_filter(ranked, get_spot(),
+                                         threshold=_CORR_THRESHOLD, n_done=_n_done)
         except Exception:
             pass
     plan, n_final = best_plan(ranked, float(capital))
@@ -894,5 +944,5 @@ if run:
 
 
 # ---------- 版本号：手动维护，每次改完功能 bump 一次 ----------
-APP_VERSION = "v1.7"        # v1.7 基本面因子：Baostock 历史财报 + ROE/净利润增速/营收增速/净利率 进 IC 检验 + merge_asof 消除前视偏差
+APP_VERSION = "v1.8"        # v1.8 全开+置信度折扣：所有进化功能第一天启用，效果按实盘样本量线性增长；新增 PyPortfolioOpt 均值方差仓位优化（numpy 兜底）
 
