@@ -153,7 +153,7 @@ def best_plan(ranked: pd.DataFrame, capital: float):
     预期收益 = 各票扣费回测收益% × 实际买入金额；摩擦含最低5元佣金
     （本金越小固定佣金越吃亏，最优只数自然越少；候选越多收益越高，只数自然越多）。
     返回 (买入方案, 最优只数)。"""
-    ret_map = ranked.set_index("代码")["预期收益%"]
+    ret_map = ranked.set_index("代码")["扣费总收益"]
     best_df, best_n, best_net = None, 0, -1e18
     for n in range(1, min(len(ranked), 20) + 1):
         plan, _left = allocate(ranked.head(n), capital)
