@@ -680,20 +680,6 @@ if run:
                "本结果为历史数据回测推演，不构成投资建议，盈亏自负。")
 
 
-# ---------- 版本戳：与远端 git commit 对齐，让用户能核对线上是否最新 ----------
-def _git_version() -> str:
-    try:
-        import subprocess
-        h = subprocess.check_output(
-            ["git", "-C", str(Path(__file__).parent), "rev-parse", "--short=7", "HEAD"],
-            stderr=subprocess.DEVNULL).decode().strip()[:7]
-        t = subprocess.check_output(
-            ["git", "-C", str(Path(__file__).parent), "log", "-1",
-             "--format=%ci"], stderr=subprocess.DEVNULL).decode().strip()[:10]
-        return f"v{h} ({t})"
-    except Exception:
-        return f"未知版（非git部署）"
-
-
-st.caption(f"🔖 版本 {_git_version()}  ·  对比远端：`git rev-parse --short HEAD` 或去仓库 https://github.com/laowanghenlan/stock-picker")
+# ---------- 版本号：手动维护，每次改完功能 bump 一次 ----------
+APP_VERSION = "v1.1"        # v1.0→v1.1 因子层v2（估值+行业中性+20日IC均值）+ 版本戳 + 样本量提示
 
