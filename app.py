@@ -17,7 +17,7 @@ import requests
 import streamlit as st
 
 from data import (get_history, get_history_impl, get_spot, get_spot_impl,
-                  industry_map_impl, refresh_spot, spot_cache_time)
+                  industry_map_impl, refresh_spot, spot_cache_time, spot_fresh_enough)
 from strategy import backtest, generate_signals
 
 # 利空关键词：近7天新闻标题命中任一即视为"有雷"，直接排除
@@ -508,7 +508,7 @@ def review_conclusion(rv: pd.DataFrame) -> str:
         text += f" 止损纪律避免了约 {saved:.0f} 元额外亏损。"
     return text
 
-APP_VERSION = "v1.8"        # v1.8 全开+置信度折扣：所有进化功能第一天启用，效果按实盘样本量线性增长；新增 PyPortfolioOpt 均值方差仓位优化（numpy 兜底）
+APP_VERSION = "v1.9"        # v1.9 提速：基本面财报加当日磁盘缓存（省约240次baostock串行查询）、K线+舆情8路并发预取、快照30分钟内免重复刷新
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 st.title("📈 每日选股")
@@ -632,6 +632,29 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
                 continue                            # 单只失败不影响其他票
     except Exception:
         fundamentals = {}  # Baostock 整体不可用，降级：基本面因子全 NaN，自动跳过
+    # ===== K线+舆情 8 路并发预取（纯 HTTP 线程安全；baostock 单连接不能并发，保持串行）=====
+    codes_all = cands["代码"].astype(str).str.zfill(6).tolist()
+    hists_pre, news_pre = {}, {}
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _fetch_one(cd):
+            try:
+                h = get_history_impl(cd, start_d.strftime("%Y%m%d"), end_d.strftime("%Y%m%d"))
+            except Exception:
+                h = None
+            try:
+                n = news_risk_impl(cd)
+            except Exception:
+                n = None
+            return cd, h, n
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for done, (cd, h, n) in enumerate(pool.map(_fetch_one, codes_all), 1):
+                hists_pre[cd], news_pre[cd] = h, n
+                progress(0.5 * done / total, f"并发下载K线+舆情 {done}/{total}")
+    except Exception:
+        hists_pre, news_pre = {}, {}        # 预取整体失败：回落到循环内串行拉取
     try:
         ind_map = industry_map_impl(cands["代码"].astype(str).tolist())   # 行业映射（磁盘缓存）
     except Exception:
@@ -639,7 +662,10 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
     for i, (_, r) in enumerate(cands.iterrows()):
         code = str(r["代码"]).zfill(6)
         try:
-            h = get_history_impl(code, start_d.strftime("%Y%m%d"), end_d.strftime("%Y%m%d"))
+            if code in hists_pre:                        # 并发预取结果（None 表示拉取失败）
+                h = hists_pre[code]
+            else:                                        # 预取未覆盖（异常回落）才串行补拉
+                h = get_history_impl(code, start_d.strftime("%Y%m%d"), end_d.strftime("%Y%m%d"))
             if h is None or len(h) < 120:
                 continue
             pe, pb = _num(r.get("市盈率-动态")), _num(r.get("市净率"))
@@ -656,7 +682,9 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
             _, _, bs = backtest(sig, initial_cash=float(capital))
             fee = float(bs["累计手续费"].rstrip("元"))
             avg_win, avg_loss = _trade_stats(sig)
-            risk_hits = news_risk_impl(code)     # 舆情排雷：近7天利空新闻（内部调用走 _impl，避免嵌套缓存）
+            risk_hits = news_pre[code] if code in news_pre else news_risk_impl(code)  # 舆情排雷（优先用并发预取结果）
+            if risk_hits is None:
+                continue                            # 舆情拉取失败：保持原行为，跳过该票
             last = sig.iloc[-1]
             # 技术面硬条件：当前价在20日线上，且5日线在20日线上（趋势仍向上）
             # _fast/_slow 是信号表里的 MA5/MA20 列
@@ -676,7 +704,7 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
             })
         except Exception:
             continue                                    # 单只失败不影响整体
-        progress((i + 1) / total, f"回测验证中 {i + 1}/{total}：{r['名称']}")
+        progress(0.5 + 0.5 * (i + 1) / total, f"回测验证中 {i + 1}/{total}：{r['名称']}")
     res = pd.DataFrame(rows)
     # 因子IC检验：行业中性化 → 逐交易日横截面IC → 最近20日均值定权
     try:
@@ -901,7 +929,8 @@ if run:
     # 选股前自动刷新行情快照（联网失败降级用旧缓存，不阻塞选股）
     with st.spinner("正在获取最新行情..."):
         try:
-            refresh_spot()
+            if not spot_fresh_enough(1800):     # 30分钟内刷新过快照就跳过，省约1分钟
+                refresh_spot()
         except Exception:
             pass
     if market_cold and not force_run:

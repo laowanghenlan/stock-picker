@@ -86,13 +86,50 @@ def _cache_save(df: pd.DataFrame, year: int, q: int) -> None:
         pass
 
 
+# ========== 单股历史财报缓存（当日有效：财报按季度发布，日内不可能变） ==========
+_HIST_DIR = CACHE_DIR / "hist"
+_HIST_DIR.mkdir(exist_ok=True)
+
+
+def _hist_cache_path(code: str) -> Path:
+    return _HIST_DIR / f"hist_{code}.csv"
+
+
+def _hist_cache_read(code: str) -> pd.DataFrame | None:
+    """读取单股历史财报缓存，仅当天内有效；不存在/过期/损坏返回 None"""
+    p = _hist_cache_path(code)
+    try:
+        if p.exists() and date.fromtimestamp(p.stat().st_mtime) == date.today():
+            df = pd.read_csv(p, dtype={"代码": str})
+            if len(df) == 0:
+                return None
+            # 报告期还原成季度索引（注意：不能先转成日期，"2025Q4" 会被误读为 2025 年 4 月）
+            df["报告期"] = pd.PeriodIndex(df["报告期"].astype(str).tolist(), freq="Q")
+            df["pubDate"] = pd.to_datetime(df["pubDate"], errors="coerce")
+            return df
+    except Exception:
+        pass
+    return None
+
+
+def _hist_cache_save(code: str, df: pd.DataFrame) -> None:
+    try:
+        df.to_csv(_hist_cache_path(code), index=False)
+    except Exception:
+        pass
+
+
 # ========== 核心：拿一只股票最近 4 个季度财报 ==========
 def fetch_fundamental(code: str, max_history_quarters: int = 8) -> pd.DataFrame:
     """
     从 baostock 拉一只股票的历史财报（最近 max_history_quarters 个季度）。
     返回 DataFrame 列：代码, 报告期, pubDate, ROE, 净利润增速, 净利率, 营收增速
-    失败返回空 DataFrame。
+    失败返回空 DataFrame。当日磁盘缓存命中时直接返回（财报日内不会变）。
     """
+    code = str(code).zfill(6)
+    cached = _hist_cache_read(code)
+    if cached is not None:
+        return cached.tail(max_history_quarters).reset_index(drop=True)
     bs_code = _to_bs_code(code)
     if not bs_code:
         return pd.DataFrame()
@@ -151,7 +188,9 @@ def fetch_fundamental(code: str, max_history_quarters: int = 8) -> pd.DataFrame:
     # 报告期统一转成季度索引（注意：不能先转成日期，"2025Q4" 会被误读为 2025 年 4 月）
     out["报告期"] = pd.PeriodIndex(out["报告期"].astype(str).tolist(), freq="Q")
     out["pubDate"] = pd.to_datetime(out["pubDate"], errors="coerce")
-    return out.sort_values("pubDate").reset_index(drop=True)
+    out = out.sort_values("pubDate").reset_index(drop=True)
+    _hist_cache_save(code, out)                     # 写当日缓存（空结果不缓存，避免污染）
+    return out
 
 
 # ========== 批量拉全市场（缓存驱动，不会频繁请求） ==========

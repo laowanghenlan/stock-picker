@@ -7,3 +7,5 @@ __pycache__/
 *.pyc
 # 本地虚拟环境不入库
 .venv/
+# 单股财报当日缓存（mtime 判新鲜度，git checkout 会刷新 mtime 造成误判，绝不入库）
+fundamental_cache/hist/

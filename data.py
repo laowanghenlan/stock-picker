@@ -40,6 +40,14 @@ def spot_cache_time() -> str:
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(_SPOT_FILE.stat().st_mtime))
 
 
+def spot_fresh_enough(max_age_sec: int = 1800) -> bool:
+    """快照缓存是否在 max_age_sec 秒内刷新过（避免每次点选股都强制全量重拉）"""
+    try:
+        return _SPOT_FILE.exists() and (time.time() - _SPOT_FILE.stat().st_mtime) < max_age_sec
+    except Exception:
+        return False
+
+
 def _needs_auto_refresh() -> bool:
     """是否需要自动更新行情：
     规则——工作日开盘(9:30)之后，若缓存还是开盘前生成的，则自动刷新一次；
