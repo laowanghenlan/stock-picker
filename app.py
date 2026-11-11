@@ -409,21 +409,36 @@ REVIEW_N = 10            # 默认复盘最近10个推送批次（按日期+推�
 REVIEW_DAYS = 20         # 推荐后最长跟踪20个交易日（与策略持有期一致），触发止盈/止损即出结果
 
 
+def _run_with_timeout(fn, *args, timeout=8, **kwargs):
+    """带硬超时的调用：东财/akshare 在云端可能 hang（不抛异常），最多等 timeout 秒。
+    超时返回 None，不阻塞页面渲染。线程不 join，避免 hang 住的连接拖死整个进程。"""
+    import concurrent.futures as _cf
+    ex = _cf.ThreadPoolExecutor(max_workers=1)
+    try:
+        return ex.submit(fn, *args, **kwargs).result(timeout=timeout)
+    except Exception:
+        return None
+    finally:
+        ex.shutdown(wait=False)
+
+
 def _index_series(start: pd.Timestamp, end: dt.date):
     """沪深300日线（日期->收盘），供复盘做基准对比；接口失败返回 None，不影响复盘本身。
     东财限流时自动降级到新浪（sh000300 日线），避免复盘里基准列整列空白。"""
+    idx = _run_with_timeout(
+        ak.index_zh_a_hist, symbol="000300", period="daily",
+        start_date=(start - dt.timedelta(days=10)).strftime("%Y%m%d"),
+        end_date=end.strftime("%Y%m%d"), timeout=10)
     try:
-        idx = ak.index_zh_a_hist(symbol="000300", period="daily",
-                                 start_date=(start - dt.timedelta(days=10)).strftime("%Y%m%d"),
-                                 end_date=end.strftime("%Y%m%d"))
-        s = pd.Series(idx["收盘"].astype(float).values, index=pd.to_datetime(idx["日期"]))
-        return s.sort_index()
+        if idx is not None and len(idx):
+            s = pd.Series(idx["收盘"].astype(float).values, index=pd.to_datetime(idx["日期"]))
+            return s.sort_index()
     except Exception:
         pass
     try:
         u = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
              "CN_MarketData.getKLineData?symbol=sh000300&scale=240&ma=no&datalen=120")
-        j = requests.get(u, timeout=15, headers={"User-Agent": "Mozilla/5.0"}).json()
+        j = requests.get(u, timeout=10, headers={"User-Agent": "Mozilla/5.0"}).json()
         s = pd.Series([float(x["close"]) for x in j],
                       index=pd.to_datetime([x["day"] for x in j]))
         return s.sort_index()
@@ -464,6 +479,27 @@ def review_impl() -> pd.DataFrame:
     df = df[df["_batch"].isin(_recent)].reset_index(drop=True)
     end_d = dt.date.today()
     idx_s = _index_series(pd.Timestamp(str(df["日期"].min())), end_d)   # 基准指数，只拉一次
+    # 并行预取所有股票历史：东财 hang 时每只最多 8 秒，6 线程并行，总耗时≈8~10 秒而非串行累加
+    import concurrent.futures as _cf
+    _hist_cache: dict = {}
+    _jobs = []
+    for _, r in df.iterrows():
+        try:
+            _jobs.append((str(r["代码"]).strip().zfill(6)[-6:], pd.Timestamp(str(r["日期"]).strip())))
+        except Exception:
+            continue
+    if _jobs:
+        _ex = _cf.ThreadPoolExecutor(max_workers=6)
+        _futs = {_ex.submit(_run_with_timeout, get_history_impl, cd,
+                            rd.strftime("%Y%m%d"), end_d.strftime("%Y%m%d"), timeout=8): (cd, rd)
+                 for cd, rd in _jobs}
+        for _f in _cf.as_completed(_futs):
+            _cd, _rd = _futs[_f]
+            try:
+                _hist_cache[(_cd, _rd)] = _f.result()
+            except Exception:
+                _hist_cache[(_cd, _rd)] = None
+        _ex.shutdown(wait=False)
     rows = []
     for _, r in df.iterrows():
         try:
@@ -475,11 +511,7 @@ def review_impl() -> pd.DataFrame:
         if price0 <= 0:
             continue
         code = str(r["代码"]).strip().zfill(6)[-6:]
-        try:
-            h = get_history_impl(code, rec_date.strftime("%Y%m%d"),
-                                 end_d.strftime("%Y%m%d"))
-        except Exception:
-            h = None
+        h = _hist_cache.get((code, rec_date))
         future = pd.Series(dtype=float)
         fdates = pd.Series(dtype="datetime64[ns]")
         if h is not None and len(h) > 0:
