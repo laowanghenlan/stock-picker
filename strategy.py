@@ -243,3 +243,46 @@ def split_validation(df: pd.DataFrame, strategy: str, params: dict,
     except (ValueError, TypeError):
         pass
     return table, warn
+
+
+# ---------------- 概率校准 & 涨跌停约束（v1.17） ----------------
+def calibrate_win_rate(win_rate: float | None, n_samples: int,
+                       prior: float = 0.5, strength: float = 20.0) -> float:
+    """贝叶斯收缩：把回测胜率向先验 50% 拉，样本越少拉得越狠。
+        p = (胜率×n + 先验×strength) / (n + strength)
+    n=0 → 先验；n=strength → 先验与回测各占一半；n 很大 → 接近原胜率。
+    用于凯利仓位与"盈利概率"展示，避免 10 笔以内的小样本把仓位带偏。"""
+    prior = min(max(float(prior), 0.0), 1.0)
+    try:
+        n = max(int(n_samples), 0)
+    except (TypeError, ValueError):
+        n = 0
+    if win_rate is None or win_rate != win_rate:      # None / NaN
+        return prior
+    wr = min(max(float(win_rate), 0.0), 1.0)
+    k = max(float(strength), 1e-9)
+    return (wr * n + prior * k) / (n + k)
+
+
+def price_limit_pct(code: str) -> float:
+    """涨跌停幅度：创业板(30)/科创板(68) 20%，北交所 30%，其余主板 10%（ST 用实际涨跌幅判断）。"""
+    c = str(code).zfill(6)
+    if c.startswith(("30", "68")):
+        return 0.20
+    if c.startswith(("4", "8", "920")):
+        return 0.30
+    return 0.10
+
+
+def at_limit_up(pct_chg: float, code: str, tol: float = 0.002) -> bool:
+    """当日涨幅是否已触及涨停（涨停买不进）。pct_chg 为百分数，如 9.98。"""
+    if pct_chg is None or pct_chg != pct_chg:
+        return False
+    return float(pct_chg) >= price_limit_pct(code) * 100 - tol * 100
+
+
+def at_limit_down(pct_chg: float, code: str, tol: float = 0.002) -> bool:
+    """当日跌幅是否已触及跌停（跌停卖不出）。"""
+    if pct_chg is None or pct_chg != pct_chg:
+        return False
+    return float(pct_chg) <= -price_limit_pct(code) * 100 + tol * 100

@@ -163,3 +163,70 @@ def optimize_weights(codes: list[str], price_history: dict[str, pd.DataFrame],
 def available() -> bool:
     """PyPortfolioOpt 是否可用（供 UI 展示用）。"""
     return _HAS_PPF
+
+
+def apply_risk_constraints(weights: dict, industries: dict,
+                           returns: pd.DataFrame | None = None,
+                           max_name: float = 0.35, max_ind: float = 0.50,
+                           vol_target: float = 0.30) -> tuple[dict, dict]:
+    """组合层风控（v1.17）：单票上限 → 行业上限 → 组合波动率目标。
+
+    参数：
+      weights:    {代码: 权重}，来自均值方差 / 凯利 / 等额
+      industries: {代码: 行业}
+      returns:    各票日收益率矩阵（列=代码），用于估计组合波动率；None 则跳过波动率目标
+      max_name:   单票最大权重（0 或 None 关闭）
+      max_ind:    单行业最大权重（0 或 None 关闭）
+      vol_target: 组合年化波动率目标，超过则整体等比降杠杆（留现金）
+
+    返回 (约束后的权重dict, 诊断dict)。
+    约束只会减仓不会加仓，权重和可能 < 1（差额即留存现金）。
+    """
+    w = {k: max(float(v), 0.0) for k, v in (weights or {}).items() if float(v) > 0}
+    info = {"单票裁剪": False, "行业裁剪": False, "波动率缩放": 1.0, "组合年化波动": None}
+    if not w:
+        return {}, info
+    total = sum(w.values()) or 1.0
+    w = {k: v / total for k, v in w.items()}          # 先归一到满仓口径
+
+    # 1. 单票上限
+    if max_name and max_name > 0:
+        for k in list(w):
+            if w[k] > max_name:
+                w[k] = max_name
+                info["单票裁剪"] = True
+
+    # 2. 行业上限（同行业合计超限则组内等比缩小）
+    if max_ind and max_ind > 0:
+        groups: dict[str, list[str]] = {}
+        for k in w:
+            groups.setdefault(industries.get(k) or "未分类", []).append(k)
+        for _, members in groups.items():
+            s = sum(w[k] for k in members)
+            if s > max_ind and s > 0:
+                scale = max_ind / s
+                for k in members:
+                    w[k] *= scale
+                info["行业裁剪"] = True
+
+    # 3. 组合波动率目标（年化）：只降杠杆，不加杠杆
+    if returns is not None and vol_target and vol_target > 0:
+        cols = [c for c in w if c in returns.columns]
+        if len(cols) >= 2 and len(returns) >= 30:
+            try:
+                cov = returns[cols].cov().values
+                wv = np.array([w[c] for c in cols])
+                vol = float(np.sqrt(max(wv @ cov @ wv, 0.0) * 252))
+                info["组合年化波动"] = round(vol, 4)
+                if vol > vol_target and vol > 1e-9:
+                    scale = vol_target / vol
+                    for k in w:
+                        w[k] *= scale
+                    info["波动率缩放"] = round(scale, 3)
+            except Exception:
+                pass
+
+    if sum(w.values()) > 1.0:                          # 双保险：绝不加杠杆
+        s = sum(w.values())
+        w = {k: v / s for k, v in w.items()}
+    return w, info

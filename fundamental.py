@@ -123,7 +123,7 @@ def _hist_cache_save(code: str, df: pd.DataFrame) -> None:
 def fetch_fundamental(code: str, max_history_quarters: int = 8) -> pd.DataFrame:
     """
     从 baostock 拉一只股票的历史财报（最近 max_history_quarters 个季度）。
-    返回 DataFrame 列：代码, 报告期, pubDate, ROE, 净利润增速, 净利率, 营收增速
+    返回 DataFrame 列：代码, 报告期, pubDate, ROE, 净利润增速, 净利率, 营收增速, 现金流质量
     失败返回空 DataFrame。当日磁盘缓存命中时直接返回（财报日内不会变）。
     """
     code = str(code).zfill(6)
@@ -160,7 +160,13 @@ def fetch_fundamental(code: str, max_history_quarters: int = 8) -> pd.DataFrame:
         except Exception:
             continue
 
-        if profit.empty and growth.empty:
+        # 现金流质量：经营现金流净额/净利润（>1 说明利润有现金支撑）
+        try:
+            cf = bs.query_cash_flow_data(code=bs_code, year=year, quarter=q).get_data()
+        except Exception:
+            cf = pd.DataFrame()
+
+        if profit.empty and growth.empty and cf.empty:
             continue
 
         row = {"代码": code, "报告期": f"{year}Q{q}"}
@@ -173,9 +179,13 @@ def fetch_fundamental(code: str, max_history_quarters: int = 8) -> pd.DataFrame:
         if not growth.empty:
             row["净利润增速"] = pd.to_numeric(growth["YOYNI"], errors="coerce").iloc[0] if "YOYNI" in growth.columns else None
             row["营收增速"] = pd.to_numeric(growth["YOYPNI"], errors="coerce").iloc[0] if "YOYPNI" in growth.columns else None
+        if not cf.empty and "CFOToNP" in cf.columns:
+            row["现金流质量"] = pd.to_numeric(cf["CFOToNP"], errors="coerce").iloc[0]
 
         # pubDate（发布日期很重要——因子只能用发布日之后的行情，避免前视偏差）
         pub = profit.get("pubDate", growth.get("pubDate"))
+        if (pub is None or len(pub) == 0) and not cf.empty:
+            pub = cf.get("pubDate")
         row["pubDate"] = str(pub.iloc[0]) if pub is not None and len(pub) > 0 else None
         rows.append(row)
 

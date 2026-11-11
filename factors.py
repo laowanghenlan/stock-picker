@@ -1,13 +1,14 @@
-"""L1 多因子层 v2：动量/波动率/换手/估值(EP、BP) + 行业中性化 + 20日IC均值配权。
+"""L1 多因子层 v3：动量/5日反转/波动率/换手率及其变化/估值(EP、BP)/财务质量 + 行业中性化 + 相关性去冗余 + 20日IC均值配权。
 
 流程（全部离线可复现）：
 1. 每只候选股按日线向量化算出因子时间序列（不逐点重算，速度快）
 2. 同一交易日内，各因子在【同行业内部】转百分位（行业中性化）；
    行业成分不足3只时退回全截面百分位
 3. 逐交易日计算横截面 Spearman IC（因子 vs 未来5日收益）→ IC时间序列
-4. 权重 = 最近 IC_AVG_N(20) 个交易日 IC 的均值；|均值| < IC_MIN(0.03) 的因子剔除，
+4. 相关性去冗余：同一交易日截面 |相关| >= CORR_MAX(0.7) 的因子只留 |IC| 更强的
+5. 权重 = 最近 IC_AVG_N(20) 个交易日 IC 的均值；|均值| < IC_MIN(0.03) 的因子剔除，
    剩余按 |IC| 归一化。符号由数据决定（IC为负自动变成反转因子）
-5. 全部无效 → 返回空权重，上层评分自动回退原版（安全兜底）
+6. 全部无效 → 返回空权重，上层评分自动回退原版（安全兜底）
 
 已知局限：EP/BP 取当前快照估值，非历史时点估值（免费数据拿不到时点PE/PB），
 所以估值因子的IC只反映"当前便宜股在历史上是否更抗跌"，不宜过度解读。
@@ -28,10 +29,10 @@ def _cfg() -> dict:
 
 import json  # noqa: E402
 
-FACTOR_COLS = ["动量20", "波动率20", "换手20", "EP", "BP"]
+FACTOR_COLS = ["动量20", "反转5", "波动率20", "换手20", "换手变化", "EP", "BP"]
 # 基本面因子（需要 Baostock 历史财报数据，避免前视偏差）
 # IC 检验自动决定要不要进评分；Baostock 挂了自动降级（留 NaN，因子跳过）
-FUND_FACTORS = ["ROE", "净利润增速", "营收增速", "净利率"]
+FUND_FACTORS = ["ROE", "净利润增速", "营收增速", "净利率", "现金流质量"]
 ALL_FACTOR_COLS = FACTOR_COLS + FUND_FACTORS
 # 以下参数优先读 strategy_config.json，读不到用默认值（v1.4 上线时的硬编码）
 IC_MIN = float(_cfg().get("因子", {}).get("IC门槛", 0.03))
@@ -41,19 +42,27 @@ WARMUP = 60          # 前60根K线不参与采样（保证因子窗口完整）
 MIN_XSEC = 15        # 单个交易日截面至少15只股票才算IC
 MIN_IND = 3          # 同行业至少3只才做组内中性化，否则退回全截面
 DECAY_DAYS = int(_cfg().get("因子", {}).get("衰减天数", 30))
+CORR_MAX = float(_cfg().get("因子", {}).get("相关性阈值", 0.70))   # 两因子截面相关超过它即剔除冗余的那个
 
 
 def factor_series(h: pd.DataFrame, pe: float = None, pb: float = None,
                   fundamental: pd.DataFrame = None) -> pd.DataFrame:
     """把一只股票的日线转成因子时间序列（向量化，含未来5日收益标签）。
-    fundamental: baostock 财报 DataFrame（列：pubDate, ROE, 净利润增速, 营收增速, 净利率）
+    fundamental: baostock 财报 DataFrame（列：pubDate, ROE, 净利润增速, 营收增速, 净利率, 现金流质量）
                  按 pubDate 向后填充——因子只用发布日之后的基本面数据，消除前视偏差。"""
     close = h["收盘"]
     out = pd.DataFrame({"日期": pd.to_datetime(h["日期"])})
     out["动量20"] = close / close.shift(20) - 1
+    # 5日反转：过去5日跌幅越大值越高（方向由IC符号最终决定）
+    out["反转5"] = -(close / close.shift(5) - 1)
     out["波动率20"] = close.pct_change().rolling(20).std()
-    out["换手20"] = (h["换手率"].rolling(20).mean() if "换手率" in h.columns
-                     else np.nan)
+    turn = h["换手率"] if "换手率" in h.columns else None
+    out["换手20"] = turn.rolling(20).mean() if turn is not None else np.nan
+    # 换手率变化：近5日均换手 / 近20日均换手 - 1，>0 表示近期交投升温
+    if turn is not None:
+        out["换手变化"] = turn.rolling(5).mean() / (turn.rolling(20).mean() + 1e-12) - 1
+    else:
+        out["换手变化"] = np.nan
     # 估值因子用倒数：越大=越便宜，方向与IC符号一致
     out["EP"] = 1.0 / pe if (pe and pe > 0) else np.nan
     out["BP"] = 1.0 / pb if (pb and pb > 0) else np.nan
@@ -164,11 +173,45 @@ def ic_summary(ics: pd.DataFrame) -> tuple:
     return ic, ir
 
 
-def ic_weights(ic: dict) -> dict:
-    """|IC|<门槛剔除；剩余按 |IC| 归一化，保留符号（负IC=反转因子）。"""
+def ic_weights(ic: dict, keep: set | None = None) -> dict:
+    """|IC|<门槛剔除；剩余按 |IC| 归一化，保留符号（负IC=反转因子）。
+    keep: 相关性去冗余后允许保留的因子集合（None=不剔除）。"""
     valid = {f: v for f, v in ic.items() if abs(v) >= IC_MIN}
+    if keep is not None:
+        valid = {f: v for f, v in valid.items() if f in keep}
     s = sum(abs(v) for v in valid.values())
     return {f: v / s for f, v in valid.items()} if s > 0 else {}
+
+
+def prune_correlated(npanel: pd.DataFrame, ic: dict,
+                     threshold: float | None = None,
+                     lookback: int = IC_AVG_N) -> set:
+    """相关性去冗余：同一交易日的横截面暴露高度相关的两个因子只留一个。
+    按 |IC| 从大到小贪心保留（IC 更强的优先），|相关| >= threshold 的后来者剔除。
+    相关性用最近 lookback 个交易日的截面相关矩阵均值，反映当前而非远古的因子结构。
+    返回保留因子名集合。"""
+    thr = CORR_MAX if threshold is None else threshold
+    cand = [f for f in ic if f + "_n" in npanel.columns and not pd.isna(ic[f])]
+    if len(cand) < 2:
+        return set(cand)
+    dates = sorted(npanel["日期"].unique())[-lookback:]
+    mats = []
+    for d in dates:
+        g = npanel[npanel["日期"] == d]
+        sub = g[[f + "_n" for f in cand]].dropna()
+        if len(sub) < MIN_XSEC:
+            continue
+        mats.append(sub.corr())
+    if not mats:
+        return set(cand)
+    avg = sum(mats) / len(mats)
+    kept: list[str] = []
+    for f in sorted(cand, key=lambda x: abs(ic[x]), reverse=True):
+        if any(abs(avg.loc[f, k]) >= thr for k in kept
+               if f in avg.index and k in avg.columns):
+            continue
+        kept.append(f)
+    return set(kept)
 
 
 def neutral_score(values: pd.Series, industries: pd.Series) -> pd.Series:

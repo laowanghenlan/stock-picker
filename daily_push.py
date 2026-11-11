@@ -82,7 +82,7 @@ LOG_FILE = Path(__file__).parent / "推送记录.csv"       # 推送留档，供
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.16"
+APP_VERSION = "v1.17"
 
 
 def _mark_sent_today() -> None:
@@ -324,7 +324,7 @@ def _render_text(d: dict) -> str:
         lines.append(
             f"  止损 {p['止损']:.2f} / 止盈 {p['止盈']:.2f} | "
             f"预计盈利 {p['预计盈利']:+.0f} 元 / 预计亏损 {p['预计亏损']:+.0f} 元"
-            f"（盈亏比 {p['盈亏比']:.1f}，历史胜率 {p['盈利概率']:.0f}%）"
+            f"（盈亏比 {p['盈亏比']:.1f}，校准胜率 {p['盈利概率']:.0f}%）"
         )
         if p["回测收益"] is not None:      # 回测明细只有定时推送那条链路有
             extra = f" · 量比 {p['量比']:.2f}" if p["量比"] is not None else ""
@@ -503,11 +503,11 @@ def _render_html(d: dict) -> str:
                  f"<td style=\"padding:4px 0;\">盈亏比 <b style=\"color:#1f2328;\">{p['盈亏比']:.1f}</b></td></tr>")
         h.append("</table>")
 
-        # 预期盈亏条：历史胜率 / 预计盈利 / 预计亏损 / 量比
+        # 预期盈亏条：校准胜率 / 预计盈利 / 预计亏损 / 量比
         h.append("<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" "
                  "style=\"margin-top:10px;background:#f7f9fc;border-radius:8px;\"><tr>")
         h.append(f"<td align=\"center\" style=\"padding:9px 4px;\">"
-                 f"<div style=\"font-size:11px;color:#8b949e;\">历史胜率</div>"
+                 f"<div style=\"font-size:11px;color:#8b949e;\">校准胜率</div>"
                  f"<div style=\"font-size:14px;font-weight:700;color:#1a73e8;\">{p['盈利概率']:.0f}%</div></td>")
         h.append(f"<td align=\"center\" style=\"padding:9px 4px;\">"
                  f"<div style=\"font-size:11px;color:#8b949e;\">预计盈利</div>"

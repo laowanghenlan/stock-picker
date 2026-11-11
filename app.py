@@ -25,7 +25,8 @@ import streamlit as st
 from data import (get_history, get_history_impl, get_spot, get_spot_impl,
                   industry_map_impl, refresh_spot, spot_cache_time, spot_fresh_enough,
                   spot_recently_failed)
-from strategy import backtest, generate_signals
+from strategy import (at_limit_down, at_limit_up, backtest, calibrate_win_rate,
+                      generate_signals)
 
 # 利空关键词：近7天新闻标题命中任一即视为"有雷"，直接排除
 NEG_KEYWORDS = ("减持", "立案", "退市", "处罚", "问询", "警示", "冻结", "失信",
@@ -291,17 +292,25 @@ def _kelly_position(ranked: pd.DataFrame, capital: float,
     b=平均赔率（平均盈亏%的绝对值比），p=胜率，q=1-p。
     v1.8 置信度折扣：n_done < 置信度阈值 时，f 乘以 confidence，
     样本越少仓位越保守，避免小样本胜率噪声导致过度集中。
+    v1.17 概率校准：胜率先向 50% 做贝叶斯收缩（样本=完整卖出笔数），
+    再进凯利公式，避免"10笔8胜"这类小样本极端值把仓位带偏。
       confidence=0 → f 几乎为 0（接近等额）；confidence=1 → 原凯利。"""
     conf = _confidence(n_done, _KELLY_CONF_TH)
     try:
         if "胜率" not in ranked.columns or "扣费总收益" not in ranked.columns:
             return pd.Series(1.0, index=ranked.index)
-        p = float(ranked["胜率"].clip(0, 1).mean())
+        n_col = "卖出笔数" if "卖出笔数" in ranked.columns else None
+        probs = []
+        for _, r in ranked.iterrows():
+            n_s = int(r.get(n_col, 0) or 0) if n_col else int(r.get("交易次数", 0) or 0) // 2
+            probs.append(calibrate_win_rate(float(r["胜率"]) / 100, n_s,
+                                            prior=0.5, strength=20.0))
+        p = float(pd.Series(probs).clip(0, 1).mean())
         avg_gain = ranked[ranked["扣费总收益"] > 0]["扣费总收益"].mean()
         avg_loss = abs(ranked[ranked["扣费总收益"] < 0]["扣费总收益"].mean()) + 1e-9
         b = avg_gain / avg_loss
         if p < min_wr or b <= 1e-6:
-            return pd.Series(1.0, index=ranked.index)  # 胜率不够降级等额
+            return pd.Series(1.0, index=ranked.index)  # 校准后胜率不够，降级等额
         f = (b * p - (1 - p)) / b
         f = max(0.01, min(max_ratio, f)) * conf  # 置信度折扣
         # 各票按预期收益加权分 f 的预算
@@ -540,7 +549,7 @@ def review_conclusion(rv: pd.DataFrame) -> str:
         text += f" 止损纪律避免了约 {saved:.0f} 元额外亏损。"
     return text
 
-APP_VERSION = "v1.16"       # v1.16 空仓日邮件也带「上一次推送表现」（此前 note 分支提前返回会漏掉）
+APP_VERSION = "v1.17"       # v1.17 滚动样本外验证+因子去冗余+概率校准+组合层风控
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 st.title("📈 每日选股")
@@ -730,8 +739,10 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
                 "最大回撤": float(bs["最大回撤"].rstrip("%")),
                 "交易次数": int(bs["交易次数"]), "手续费": fee,
                 "平均盈利率": avg_win, "平均亏损率": avg_loss,
-                "动量20": fv["动量20"], "波动率20": fv["波动率20"], "换手20": fv["换手20"],
-                "EP": fv["EP"], "BP": fv["BP"], "行业": meta[code]["行业"],
+                # 概率校准要用真实完整卖出笔数当样本量（不是交易次数）
+                "卖出笔数": int(bs["完整卖出笔数"]),
+                **{c: fv.get(c) for c in factors.ALL_FACTOR_COLS},
+                "行业": meta[code]["行业"],
                 "趋势向上": trend_ok,
                 "有雷": len(risk_hits) > 0, "利空标题": "；".join(risk_hits[:2]),
             })
@@ -744,12 +755,19 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
         npanel = factors.neutralize(factors.build_panel(hists, meta, fundamentals=fundamentals))
         ics = factors.ic_series(npanel)
         ic, ir = factors.ic_summary(ics)
+        ic_all = dict(ic)                               # 全量IC（落盘监控用，不剔除冗余）
+        # 相关性去冗余：同一天截面高度相关的因子只留IC更强的那个
+        keep = factors.prune_correlated(npanel, ic_all)
+        ic = {f: v for f, v in ic_all.items() if f in keep}
+        ir = {f: v for f, v in ir.items() if f in keep}
         res.attrs["ic"], res.attrs["icir"] = ic, ir
+        res.attrs["ic_all"] = ic_all
+        res.attrs["ic_keep"] = sorted(keep)
         res.attrs["ic_n"] = int(len(ics))               # 参与检验的交易日数（置信度参考）
         # 因子衰减监控：把今天的IC存进历史CSV（每天append一次，供后续趋势判断）
         try:
             import factor_learning
-            factor_learning.append_factor_ic_history(ic, pd.Timestamp.now().strftime("%Y-%m-%d"))
+            factor_learning.append_factor_ic_history(ic_all, pd.Timestamp.now().strftime("%Y-%m-%d"))
         except Exception:
             pass
     except Exception:
@@ -838,58 +856,90 @@ def pick_top3(res: pd.DataFrame, n: int = PICKS) -> pd.DataFrame:
 
 def allocate(picks: pd.DataFrame, budget0: float,
              n_done: int = 0, hists: dict | None = None) -> pd.DataFrame:
-    """第四步：把本金尽量买满。
+    """第四步：把本金按权重分配，并做组合层风控。
     v1.8 仓位分配优先级：均值方差优化 > 凯利公式 > 等额分配
       1. 均值方差优化（PyPortfolioOpt 或 numpy 闭式解）：按 max_sharpe 给权重
-      2. 凯利公式：胜率高/赔率大的票拿更多预算
+      2. 凯利公式：校准后的胜率 + 赔率决定总仓位，按预期收益分给各票
       3. 等额分配：兜底
     三者都带置信度折扣（样本不足时向等额靠拢）。
-    每只按目标买100股的整数倍，买完后剩余的钱自动顺延给下一只，最后一只尽量把预算花完。"""
-    cfg_pos = _cfg().get("仓位管理", {}) if "_cfg" in dir() else {}
+    v1.17 组合层风控：单票上限 / 行业上限 / 组合年化波动率目标，
+      超限只减仓不加仓，权重和不足 1 的部分留现金。
+    每只按目标买100股的整数倍；目标金额买不起1手时按最低1手买入（小资金例外）。"""
+    cfg_pos = _cfg().get("仓位管理", {})
     hists = hists or {}
+
+    codes = picks["代码"].astype(str).str.zfill(6).tolist()
+    n = len(picks)
+    weights = [1.0 / n] * n                 # 兜底：等额
+    risk_info = {}
 
     # ===== 1. 均值方差优化（PyPortfolioOpt / numpy 兜底） =====
     opt_weights = None
-    if _USE_MV_OPT and len(picks) > 1:
+    if _USE_MV_OPT and n > 1:
         try:
             import portfolio_optimizer as po
-            codes = picks["代码"].astype(str).str.zfill(6).tolist()
             exp_ret = {c: float(picks.loc[picks["代码"].astype(str).str.zfill(6) == c, "扣费总收益"].iloc[0]) / 100
                        for c in codes if len(picks.loc[picks["代码"].astype(str).str.zfill(6) == c]) > 0}
             w, method = po.optimize_weights(codes, hists, exp_ret, n_done=n_done)
             if w:
                 # 按 picks 的顺序对齐权重
                 opt_weights = [w.get(c, 0.0) for c in codes]
+                weights = list(opt_weights)
         except Exception:
             opt_weights = None
 
     # ===== 2. 凯利公式（均值方差失败时降级） =====
-    kelly_weights = None
-    if opt_weights is None and _USE_KELLY and len(picks) > 1:
+    if opt_weights is None and _USE_KELLY and n > 1:
         try:
             kw = _kelly_position(picks, budget0,
                                  min_wr=float(cfg_pos.get("凯利公式", {}).get("最小胜率", 0.55)),
                                  max_ratio=float(cfg_pos.get("凯利公式", {}).get("最大仓位比例", 0.15)),
                                  n_done=n_done)
             if not (kw == 1.0).all():
-                kelly_weights = kw.values
+                weights = [float(x) for x in kw.values]
         except Exception:
             pass
 
+    # ===== 3. 组合层风控：单票上限 → 行业上限 → 组合波动率目标 =====
+    # 只减仓不加仓：权重和可能 < 1，差额留现金（波动率过高时自动降杠杆）
+    try:
+        rk = cfg_pos.get("组合风控", {})
+        if rk.get("启用", True):
+            import portfolio_optimizer as po
+            ind_map = (dict(zip(codes, picks["行业"].astype(str)))
+                       if "行业" in picks.columns else {})
+            rets = None
+            if hists:
+                closes = {}
+                for c in codes:
+                    h = hists.get(c)
+                    if h is None or len(h) < 60:
+                        continue
+                    hs = h.sort_values("日期")
+                    closes[c] = hs.set_index(pd.to_datetime(hs["日期"]))["收盘"].astype(float)
+                if len(closes) >= 2:
+                    rets = pd.DataFrame(closes).dropna().pct_change().dropna()
+            w2, risk_info = po.apply_risk_constraints(
+                dict(zip(codes, weights)), ind_map, rets,
+                max_name=float(rk.get("单票上限", 0.35)),
+                max_ind=float(rk.get("行业上限", 0.50)),
+                vol_target=float(rk.get("组合年化波动率目标", 0.30)))
+            if w2 and sum(w2.values()) > 0:
+                weights = [float(w2.get(c, 0.0)) for c in codes]
+    except Exception:
+        risk_info = {}
+
+    if sum(weights) <= 0:                   # 约束异常兜底，绝不出现空方案
+        weights = [1.0 / n] * n
+
     plan, budget = [], budget0
-    n = len(picks)
     for i, (_, r) in enumerate(picks.iterrows()):
         price = r["最新价"]
-        if opt_weights is not None:
-            # 均值方差权重：按预算 × 权重 / 剩余权重和
-            w_remain = float(sum(opt_weights[i:])) + 1e-9
-            target = budget * float(opt_weights[i]) / w_remain
-        elif kelly_weights is not None:
-            # 凯利加权：按预算 × 权重 / 剩余权重和
-            w_remain = float(kelly_weights[i:].sum()) + 1e-9
-            target = budget * float(kelly_weights[i]) / w_remain
-        else:
-            target = budget / (n - i)                         # 均摊到当前这只的目标金额
+        target = budget0 * float(weights[i])
+        if target < price * 100:                          # 目标金额买不起1手
+            if budget < price * 100:
+                continue                                  # 现金也不够，跳过
+            target = price * 100                          # 小资金例外：按最低1手买入
         shares = int(target / price / 100) * 100          # 100股整数倍
         if shares == 0:
             shares = 100                                  # 至少买1手，否则这笔钱就浪费了
@@ -903,7 +953,9 @@ def allocate(picks: pd.DataFrame, budget0: float,
         if shares <= 0:
             continue                                      # 连1手都买不起，跳过
         invest = round(cost + fee, 2)
-        win_prob = r["胜率"] / 100
+        # 概率校准：回测胜率按完整卖出笔数向 50% 做贝叶斯收缩
+        n_tr = int(r.get("卖出笔数", 0) or 0)
+        p_cal = calibrate_win_rate(float(r["胜率"]) / 100, n_tr, prior=0.5, strength=20.0)
         est_win = round(invest * r["平均盈利率"] / 100, 1)
         est_loss = round(invest * r["平均亏损率"] / 100, 1)
         plan.append({
@@ -911,16 +963,18 @@ def allocate(picks: pd.DataFrame, budget0: float,
             "现价": price, "买入股数": shares,
             "佣金(元)": round(fee, 2),
             "投入(含佣金)": invest,
-            "盈利概率": round(r["胜率"], 0),
+            "盈利概率": round(p_cal * 100, 0),
             "预计盈利(元)": est_win,
             "预计亏损(元)": -est_loss,
             "止损价(买入价×0.95)": round(price * (1 - STOP_LOSS_PCT), 2),
             "止盈参考(买入价×1.10)": round(price * (1 + TAKE_PROFIT_PCT), 2),
-            "_win_prob": win_prob,
+            "_win_prob": p_cal,
             "_est_win": est_win, "_est_loss": est_loss,
         })
         budget -= invest
     df = pd.DataFrame(plan)
+    if len(df) and risk_info:
+        df.attrs["risk_info"] = risk_info
     leftover = round(budget, 2)
     return df, leftover
 
@@ -944,8 +998,8 @@ with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}条，自动更新�
             m3.metric("平均每笔盈亏", "—")
             m4.metric("累计盈亏", "—")
         _cols = ["名称", "推荐价", "现价", "盈亏%", "同期沪深300%", "结果"]
-        _cfg = {"盈亏%": st.column_config.NumberColumn(format="%+.2f%%"),
-                "同期沪深300%": st.column_config.NumberColumn(format="%+.2f%%")}
+        _col_fmt = {"盈亏%": st.column_config.NumberColumn(format="%+.2f%%"),
+                    "同期沪深300%": st.column_config.NumberColumn(format="%+.2f%%")}
         # 按推送批次（日期+时间）分组显示，批次之间用红色横线隔开：
         # 既区分不同日期，也区分同一天里第几次推送
         for i, (_, g) in enumerate(rv.groupby("_batch", sort=False)):
@@ -955,7 +1009,7 @@ with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}条，自动更新�
             _day, _tm = g["日期"].iloc[0], g["推送时间"].iloc[0]
             _when = f"{_day} {_tm}" if _tm else _day
             st.markdown(f"**📅 {_when} 推送 · {len(g)} 只**")
-            st.dataframe(g[_cols], width="stretch", hide_index=True, column_config=_cfg)
+            st.dataframe(g[_cols], width="stretch", hide_index=True, column_config=_col_fmt)
         st.info("💡 " + review_conclusion(rv))
         if len(done) < 30:
             st.caption(f"⚠️ 已出结果仅 {len(done)} 笔（<30），统计意义不足，结论别太当真；"
@@ -1102,7 +1156,7 @@ if run:
                                 "预计盈利(元)": st.column_config.NumberColumn(format="%+.1f"),
                                 "预计亏损(元)": st.column_config.NumberColumn(format="%.1f")})
     st.caption("预计盈利/亏损 = 投入 × 该股历史平均每笔盈利率/亏损率（已扣交易成本）；"
-               "盈利概率 = 历史回测胜率。均为历史统计推算，不代表未来，不构成投资建议。")
+               "盈利概率 = 回测胜率经贝叶斯收缩后的校准值（样本少时向50%收敛）。均为历史统计推算，不代表未来，不构成投资建议。")
 
     st.markdown("**照做就行：**")
     for _, p in plan.iterrows():
