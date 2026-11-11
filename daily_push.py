@@ -82,7 +82,7 @@ LOG_FILE = Path(__file__).parent / "推送记录.csv"       # 推送留档，供
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.15"
+APP_VERSION = "v1.16"
 
 
 def _mark_sent_today() -> None:
@@ -279,6 +279,17 @@ def _norm_pick(p: dict) -> dict:
 
 
 # ========== 纯文本版（不支持 HTML 的客户端兜底） ==========
+def _last_text_lines(lb: dict) -> list:
+    """上一次推送的逐只表现（纯文本）。空仓日也要给，所以抽成函数供两处复用。"""
+    _when = f"{lb['date']} {lb['time']}" if lb["time"] else lb["date"]
+    out = ["", f"【上一次推送 {_when} · {len(lb['rows'])} 只】现在怎么样："]
+    for x in lb["rows"]:
+        out.append(f"  {x['名称']} 推荐 {x['推荐价']:.2f} → 现价 {x['现价']:.2f}  "
+                   f"{x['盈亏%']:+.1f}%（{x['盈亏额']:+.0f} 元）  {x['结果']}")
+    out.append(f"  合计 {lb['pnl']:+.0f} 元（盈利 {lb['wins']} 只 / 亏损 {lb['losses']} 只）")
+    return out
+
+
 def _render_text(d: dict) -> str:
     lines = [f"大盘标签 {d['tag']}：沪深300 收盘 {d['idx_close']:.0f}，"
              f"60日均线 {d['idx_ma60']:.0f}", ""]
@@ -288,6 +299,8 @@ def _render_text(d: dict) -> str:
         lines.append("")
 
     if d["note"]:
+        if d.get("last"):                     # 空仓日也回顾上一次推送的赚亏
+            lines += _last_text_lines(d["last"])
         lines.append(d["note"])
         return "\n".join(lines)
 
@@ -328,12 +341,7 @@ def _render_text(d: dict) -> str:
     # —— 上一次推送表现：赚了还是亏了、赚亏多少 ——
     lb = d.get("last")
     if lb:
-        _when = f"{lb['date']} {lb['time']}" if lb["time"] else lb["date"]
-        lines += ["", f"【上一次推送 {_when} · {len(lb['rows'])} 只】现在怎么样："]
-        for x in lb["rows"]:
-            lines.append(f"  {x['名称']} 推荐 {x['推荐价']:.2f} → 现价 {x['现价']:.2f}  "
-                         f"{x['盈亏%']:+.1f}%（{x['盈亏额']:+.0f} 元）  {x['结果']}")
-        lines.append(f"  合计 {lb['pnl']:+.0f} 元（盈利 {lb['wins']} 只 / 亏损 {lb['losses']} 只）")
+        lines += _last_text_lines(lb)
 
     r = d["review"]
     if r:
@@ -359,6 +367,35 @@ def _render_text(d: dict) -> str:
 
 
 # ========== HTML 版（卡片排版，全内联样式，兼容 QQ 邮箱） ==========
+def _last_html(lb: dict) -> str:
+    """上一次推送表现卡片（HTML）。空仓日也要给，所以抽成函数供两处复用。"""
+    _when = f"{lb['date']} {lb['time']}" if lb["time"] else lb["date"]
+    _pc = "#d93025" if lb["pnl"] >= 0 else "#1a7f37"            # A股：红涨绿跌
+    h = ["<div style=\"border:1px solid #e6e9ee;border-radius:12px;padding:14px 16px;"
+         "margin-bottom:14px;\">",
+         f"<div style=\"font-size:13.5px;font-weight:700;color:#1f2328;margin-bottom:4px;\">"
+         f"📌 上一次推送表现 · {_when}（{len(lb['rows'])} 只）</div>",
+         f"<div style=\"font-size:12px;color:#8b949e;margin-bottom:10px;\">合计 "
+         f"<b style=\"color:{_pc};font-size:14px;\">{lb['pnl']:+.0f} 元</b>"
+         f"　盈利 {lb['wins']} 只 / 亏损 {lb['losses']} 只</div>",
+         "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" "
+         "style=\"font-size:12.5px;color:#57606a;border-collapse:collapse;\">",
+         "<tr style=\"color:#9aa4b1;font-size:11.5px;\">"
+         "<td style=\"padding:6px 0;border-bottom:1px solid #eef1f4;\">名称</td>"
+         "<td align=\"right\" style=\"border-bottom:1px solid #eef1f4;\">推荐价→现价</td>"
+         "<td align=\"right\" style=\"border-bottom:1px solid #eef1f4;\">盈亏</td></tr>"]
+    for x in lb["rows"]:
+        c = "#d93025" if x["盈亏%"] >= 0 else "#1a7f37"
+        h.append(f"<tr><td style=\"padding:7px 0;border-bottom:1px solid #f4f6f9;\">{x['名称']}</td>"
+                 f"<td align=\"right\" style=\"border-bottom:1px solid #f4f6f9;\">"
+                 f"{x['推荐价']:.2f}→{x['现价']:.2f}</td>"
+                 f"<td align=\"right\" style=\"border-bottom:1px solid #f4f6f9;color:{c};\">"
+                 f"{x['盈亏%']:+.1f}%<br><span style=\"font-size:11px;\">"
+                 f"{x['盈亏额']:+.0f} 元</span></td></tr>")
+    h.append("</table></div>")
+    return "".join(h)
+
+
 def _render_html(d: dict) -> str:
     # 回暖期蓝色 / 低温期橙色
     head_bg = ("linear-gradient(135deg,#d9822b,#b8690f)" if d["cold"]
@@ -391,6 +428,8 @@ def _render_html(d: dict) -> str:
 
     # —— 提前结束（空仓等） ——
     if d["note"]:
+        if d.get("last"):                     # 空仓日也回顾上一次推送的赚亏
+            h.append(_last_html(d["last"]))
         h.append("<div style=\"background:#f4f7fb;border:1px solid #dbe5f2;padding:20px;"
                  "border-radius:12px;font-size:14px;color:#33475b;text-align:center;line-height:1.7;\">"
                  f"{d['note']}</div>")
@@ -492,30 +531,7 @@ def _render_html(d: dict) -> str:
     # —— 上一次推送表现（赚了还是亏了） ——
     lb = d.get("last")
     if lb:
-        _when = f"{lb['date']} {lb['time']}" if lb["time"] else lb["date"]
-        _pc = "#d93025" if lb["pnl"] >= 0 else "#1a7f37"        # A股：红涨绿跌
-        h.append("<div style=\"border:1px solid #e6e9ee;border-radius:12px;padding:14px 16px;"
-                 "margin-bottom:14px;\">")
-        h.append(f"<div style=\"font-size:13.5px;font-weight:700;color:#1f2328;margin-bottom:4px;\">"
-                 f"📌 上一次推送表现 · {_when}（{len(lb['rows'])} 只）</div>")
-        h.append(f"<div style=\"font-size:12px;color:#8b949e;margin-bottom:10px;\">合计 "
-                 f"<b style=\"color:{_pc};font-size:14px;\">{lb['pnl']:+.0f} 元</b>"
-                 f"　盈利 {lb['wins']} 只 / 亏损 {lb['losses']} 只</div>")
-        h.append("<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" "
-                 "style=\"font-size:12.5px;color:#57606a;border-collapse:collapse;\">")
-        h.append("<tr style=\"color:#9aa4b1;font-size:11.5px;\">"
-                 "<td style=\"padding:6px 0;border-bottom:1px solid #eef1f4;\">名称</td>"
-                 "<td align=\"right\" style=\"border-bottom:1px solid #eef1f4;\">推荐价→现价</td>"
-                 "<td align=\"right\" style=\"border-bottom:1px solid #eef1f4;\">盈亏</td></tr>")
-        for x in lb["rows"]:
-            c = "#d93025" if x["盈亏%"] >= 0 else "#1a7f37"
-            h.append(f"<tr><td style=\"padding:7px 0;border-bottom:1px solid #f4f6f9;\">{x['名称']}</td>"
-                     f"<td align=\"right\" style=\"border-bottom:1px solid #f4f6f9;\">"
-                     f"{x['推荐价']:.2f}→{x['现价']:.2f}</td>"
-                     f"<td align=\"right\" style=\"border-bottom:1px solid #f4f6f9;color:{c};\">"
-                     f"{x['盈亏%']:+.1f}%<br><span style=\"font-size:11px;\">"
-                     f"{x['盈亏额']:+.0f} 元</span></td></tr>")
-        h.append("</table></div>")
+        h.append(_last_html(lb))
 
     # —— 复盘 ——
     r = d["review"]

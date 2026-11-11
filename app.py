@@ -540,7 +540,7 @@ def review_conclusion(rv: pd.DataFrame) -> str:
         text += f" 止损纪律避免了约 {saved:.0f} 元额外亏损。"
     return text
 
-APP_VERSION = "v1.15"       # v1.15 邮件新增「上一次推送表现」：逐只 推荐价→现价、盈亏%与盈亏金额、合计
+APP_VERSION = "v1.16"       # v1.16 空仓日邮件也带「上一次推送表现」（此前 note 分支提前返回会漏掉）
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 st.title("📈 每日选股")
