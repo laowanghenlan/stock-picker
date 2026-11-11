@@ -531,7 +531,7 @@ def review_conclusion(rv: pd.DataFrame) -> str:
         text += f" 止损纪律避免了约 {saved:.0f} 元额外亏损。"
     return text
 
-APP_VERSION = "v1.12"       # v1.12 结果表新增"佣金"列 + 交易成本明细（买入佣金/卖出预计费用/占买入金额比例）
+APP_VERSION = "v1.13"       # v1.13 历史复盘按推送日分批显示，批次之间用红色横线隔开
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 st.title("📈 每日选股")
@@ -934,10 +934,16 @@ with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}条，自动更新�
             m2.metric("胜率", "—")
             m3.metric("平均每笔盈亏", "—")
             m4.metric("累计盈亏", "—")
-        st.dataframe(rv[["日期", "名称", "推荐价", "现价", "盈亏%", "同期沪深300%", "结果"]],
-                     width="stretch", hide_index=True,
-                     column_config={"盈亏%": st.column_config.NumberColumn(format="%+.2f%%"),
-                                    "同期沪深300%": st.column_config.NumberColumn(format="%+.2f%%")})
+        _cols = ["名称", "推荐价", "现价", "盈亏%", "同期沪深300%", "结果"]
+        _cfg = {"盈亏%": st.column_config.NumberColumn(format="%+.2f%%"),
+                "同期沪深300%": st.column_config.NumberColumn(format="%+.2f%%")}
+        # 按推送日分批显示，不同批次之间用红色横线隔开，避免几天的推荐混在一张表里分不清
+        for i, (rec_day, g) in enumerate(rv.groupby("日期", sort=False)):
+            if i:
+                st.markdown("<hr style='border:none;border-top:2px solid #ff4b4b;margin:12px 0'>",
+                            unsafe_allow_html=True)
+            st.markdown(f"**📅 {rec_day} 推送 · {len(g)} 只**")
+            st.dataframe(g[_cols], width="stretch", hide_index=True, column_config=_cfg)
         st.info("💡 " + review_conclusion(rv))
         if len(done) < 30:
             st.caption(f"⚠️ 已出结果仅 {len(done)} 笔（<30），统计意义不足，结论别太当真；"
