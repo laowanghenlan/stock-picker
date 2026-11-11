@@ -1,21 +1,45 @@
 # -*- coding: utf-8 -*-
 """
-每日自动推送脚本（由 GitHub Actions 定时触发，周一至周五北京时间 9:00）
+每日自动推送脚本（由 GitHub Actions 定时触发，周一至周五北京时间 9:00；9:40/10:20 冗余重试，当天已发则跳过）
 流程：全市场筛选 -> 扣费回测 -> 舆情排雷 -> 本金+收益自动定只数 -> 分配本金 -> QQ邮箱推送
 邮件同时输出 HTML（卡片排版）与纯文本（兜底）两个版本
 """
+import datetime as _datetime
 import json
 import os
-import smtplib
 import sys
-from email.header import Header
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from pathlib import Path
 
-import pandas as pd
+BASE_DIR = Path(__file__).parent
+STATE_FILE = BASE_DIR / "推送状态.json"    # 记录最后发送日期，供冗余 cron 判重
 
-import app  # 复用 web 应用的选股逻辑；裸运行无 ScriptRunContext，一律调 *_impl 版本（绕开 st.cache_data）
+
+def _today() -> str:
+    return _datetime.date.today().strftime("%Y-%m-%d")
+
+
+def _already_sent_today() -> bool:
+    """当天是否已经推送过（冗余 cron 只发一次用）"""
+    try:
+        return json.loads(STATE_FILE.read_text(encoding="utf-8")).get("last_sent") == _today()
+    except Exception:
+        return False                      # 读不到状态就按"没发过"处理，宁可重复也不漏发
+
+
+# 判重必须在 import app 之前：app 会连带加载 akshare 等重依赖，白等约 2 分钟
+# （PUSH_FORCE=1 表示手动触发 / cron-job.org 兜底，强制发送，便于测试和补发）
+if __name__ == "__main__" and os.environ.get("PUSH_FORCE") != "1" and _already_sent_today():
+    print("今日已推送过，跳过本次冗余触发")
+    sys.exit(0)
+
+import smtplib                                                  # noqa: E402
+from email.header import Header                                 # noqa: E402
+from email.mime.multipart import MIMEMultipart                  # noqa: E402
+from email.mime.text import MIMEText                            # noqa: E402
+
+import pandas as pd                                             # noqa: E402
+
+import app  # 复用 web 应用的选股逻辑；裸运行无 ScriptRunContext，一律调 *_impl 版本（绕开 st.cache_data）  # noqa: E402
 
 
 def _load_capital() -> float:
@@ -36,7 +60,18 @@ LOG_FILE = Path(__file__).parent / "推送记录.csv"       # 推送留档，供
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.8"
+APP_VERSION = "v1.9"
+
+
+def _mark_sent_today() -> None:
+    """发送成功后落标记；由工作流回传仓库，供后续冗余触发判断"""
+    try:
+        STATE_FILE.write_text(
+            json.dumps({"last_sent": _today()}, ensure_ascii=False, indent=2),
+            encoding="utf-8")
+    except Exception as e:
+        print("写入推送状态失败(不影响已发出的邮件):", e)
+
 
 FONT = "-apple-system,'PingFang SC','Microsoft YaHei',Arial,sans-serif"
 
@@ -371,8 +406,10 @@ def send(text: str, html: str):
 
 
 if __name__ == "__main__":
+    # 当天已发的判重已在文件顶部（import app 之前）完成，这里只负责发送
     try:
         send(*build_email())
+        _mark_sent_today()
         print("推送成功")
     except Exception as e:
         print(f"推送失败: {type(e).__name__}: {e}", file=sys.stderr)
