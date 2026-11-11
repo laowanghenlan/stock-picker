@@ -23,7 +23,8 @@ import requests
 import streamlit as st
 
 from data import (get_history, get_history_impl, get_spot, get_spot_impl,
-                  industry_map_impl, refresh_spot, spot_cache_time, spot_fresh_enough)
+                  industry_map_impl, refresh_spot, spot_cache_time, spot_fresh_enough,
+                  spot_recently_failed)
 from strategy import backtest, generate_signals
 
 # 利空关键词：近7天新闻标题命中任一即视为"有雷"，直接排除
@@ -530,7 +531,7 @@ def review_conclusion(rv: pd.DataFrame) -> str:
         text += f" 止损纪律避免了约 {saved:.0f} 元额外亏损。"
     return text
 
-APP_VERSION = "v1.9"        # v1.9 提速：基本面财报加当日磁盘缓存（省约240次baostock串行查询）、K线+舆情8路并发预取、快照30分钟内免重复刷新
+APP_VERSION = "v1.10"       # v1.10 稳定性：全市场快照加100秒硬超时（防东财限流导致无限转圈），失败10分钟内不重试并降级用缓存
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 st.title("📈 每日选股")
@@ -950,12 +951,20 @@ run = st.button("🔍 今日选股", type="primary", width='stretch')
 
 if run:
     # 选股前自动刷新行情快照（联网失败降级用旧缓存，不阻塞选股）
-    with st.spinner("正在获取最新行情..."):
-        try:
-            if not spot_fresh_enough(1800):     # 30分钟内刷新过快照就跳过，省约1分钟
-                refresh_spot()
-        except Exception:
-            pass
+    _cache_tag = spot_cache_time()
+    if spot_recently_failed():          # 刚失败过，10分钟内不再干等100秒
+        st.warning(f"行情接口刚拉取失败，10分钟内不再重试，沿用 {_cache_tag} 的缓存继续。")
+    else:
+        with st.spinner(f"正在获取最新行情（本地缓存：{_cache_tag}，云端首次约1~2分钟）..."):
+            try:
+                if not spot_fresh_enough(1800):   # 30分钟内刷新过快照就跳过，省约1分钟
+                    refresh_spot()
+            except Exception as e:
+                if _cache_tag == "无缓存":
+                    st.error(f"行情接口无响应，且本地没有可用缓存，暂时无法选股（{e}）。"
+                             "云端刚重启时首次拉取较慢，请过几分钟再点一次。")
+                    st.stop()
+                st.warning(f"行情刷新失败，沿用 {_cache_tag} 的缓存继续：{e}")
     if market_cold and not force_run:
         st.error("大盘低温期，已拦截选股。请勾选上方「我知道风险，仍要选股」后再点。")
         st.stop()

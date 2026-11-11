@@ -2,6 +2,7 @@
 import datetime as dt
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from pathlib import Path
 
 import akshare as ak
@@ -10,6 +11,8 @@ import streamlit as st
 
 # 全市场快照的磁盘缓存文件：进程重启后仍可直接读盘，避免每次启动都联网拉取
 _SPOT_FILE = Path(__file__).parent / "spot_cache.csv"
+_SPOT_TIMEOUT = 100        # 全市场快照的硬超时（秒）。慢网正常约60~80秒，超过说明被限流
+_spot_fail_at = 0.0        # 上次拉取失败的时刻：10分钟内不再重试，避免每次点击都卡满超时
 
 
 def _read_spot_cache() -> pd.DataFrame | None:
@@ -24,8 +27,22 @@ def _read_spot_cache() -> pd.DataFrame | None:
 
 
 def _fetch_spot() -> pd.DataFrame:
-    """联网拉取全市场快照（约1分钟）并写入本地缓存"""
-    df = ak.stock_zh_a_spot_em()
+    """联网拉取全市场快照（约1分钟）并写入本地缓存。
+    akshare 内部请求没有超时，云端 IP 被东财限流时会无限挂起（页面一直转圈），
+    这里用线程加硬超时，超时抛 TimeoutError 交给上层降级用缓存。"""
+    global _spot_fail_at
+    ex = ThreadPoolExecutor(max_workers=1)
+    fut = ex.submit(ak.stock_zh_a_spot_em)
+    try:
+        df = fut.result(timeout=_SPOT_TIMEOUT)
+    except FuturesTimeout:
+        _spot_fail_at = time.time()
+        raise TimeoutError(f"行情接口 {_SPOT_TIMEOUT} 秒无响应，可能被限流或网络不通")
+    except Exception:
+        _spot_fail_at = time.time()
+        raise
+    finally:
+        ex.shutdown(wait=False)       # 不等待卡住的线程，立即把控制权交回页面
     try:
         df.to_csv(_SPOT_FILE, index=False, encoding="utf-8-sig")
     except Exception:
@@ -48,6 +65,11 @@ def spot_fresh_enough(max_age_sec: int = 1800) -> bool:
         return False
 
 
+def spot_recently_failed(cooldown: int = 600) -> bool:
+    """距上次拉取失败是否还在冷却期内（避免每次点击都白等100秒超时）"""
+    return _spot_fail_at > 0 and (time.time() - _spot_fail_at) < cooldown
+
+
 def _needs_auto_refresh() -> bool:
     """是否需要自动更新行情：
     规则——工作日开盘(9:30)之后，若缓存还是开盘前生成的，则自动刷新一次；
@@ -55,6 +77,8 @@ def _needs_auto_refresh() -> bool:
     """
     if not _SPOT_FILE.exists():
         return True
+    if time.time() - _spot_fail_at < 600:      # 刚失败过，别立刻再卡100秒
+        return False
     mtime = dt.datetime.fromtimestamp(_SPOT_FILE.stat().st_mtime)
     now = dt.datetime.now()
     open_time = now.replace(hour=9, minute=30, second=0, microsecond=0)
