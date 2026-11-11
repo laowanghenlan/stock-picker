@@ -51,7 +51,7 @@ jobs:
           git config user.name "stock-bot"
           git config user.email "stock-bot@local"
           # 推送状态.json 是"今天已发过"的标记，必须回传，否则冗余 cron 会重复发信
-          git add 推送记录.csv 推送状态.json 因子历史IC.csv strategy_config.json fundamental_cache/ 2>/dev/null || true
+          git add 推送记录.csv 推送状态.json 因子历史IC.csv strategy_config.json fundamental_cache/ 实盘台账.csv 2>/dev/null || true
           git diff --cached --quiet || git commit -m "每日留档 + 进化配置 $(date +%F)"
           git pull --rebase --autostash origin master || true
           git push

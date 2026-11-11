@@ -405,12 +405,13 @@ def _confidence(n_done: int, threshold: int) -> float:
 
 # ---------------- 历史推荐复盘（打开页面自动执行，无需点击） ----------------
 REVIEW_FILE = Path(__file__).parent / "推送记录.csv"   # GitHub Actions 每日推送留档
-REVIEW_N = 10            # 默认复盘最近10条推荐（低温期可能多天无推荐，不限于7天）
+REVIEW_N = 10            # 默认复盘最近10个推送批次（按日期+推送时间整批保留，不切断批次）
 REVIEW_DAYS = 20         # 推荐后最长跟踪20个交易日（与策略持有期一致），触发止盈/止损即出结果
 
 
 def _index_series(start: pd.Timestamp, end: dt.date):
-    """沪深300日线（日期->收盘），供复盘做基准对比；接口失败返回 None，不影响复盘本身。"""
+    """沪深300日线（日期->收盘），供复盘做基准对比；接口失败返回 None，不影响复盘本身。
+    东财限流时自动降级到新浪（sh000300 日线），避免复盘里基准列整列空白。"""
     try:
         idx = ak.index_zh_a_hist(symbol="000300", period="daily",
                                  start_date=(start - dt.timedelta(days=10)).strftime("%Y%m%d"),
@@ -418,11 +419,20 @@ def _index_series(start: pd.Timestamp, end: dt.date):
         s = pd.Series(idx["收盘"].astype(float).values, index=pd.to_datetime(idx["日期"]))
         return s.sort_index()
     except Exception:
+        pass
+    try:
+        u = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+             "CN_MarketData.getKLineData?symbol=sh000300&scale=240&ma=no&datalen=120")
+        j = requests.get(u, timeout=15, headers={"User-Agent": "Mozilla/5.0"}).json()
+        s = pd.Series([float(x["close"]) for x in j],
+                      index=pd.to_datetime([x["day"] for x in j]))
+        return s.sort_index()
+    except Exception:
         return None
 
 
 def review_impl() -> pd.DataFrame:
-    """复盘最近 REVIEW_N 条推送记录：
+    """复盘最近 REVIEW_N 个推送批次（同一天多次推送按「推送时间」分批，整批保留）：
     推荐日后最长跟踪 REVIEW_DAYS 个交易日（与策略持有期一致），逐日判定谁先触发
     止盈(+10%)/止损(-5%)；满20日未触发按到期收盘定盈亏（🏁）；
     未满20日且未触发标 ⏳持有中，不计入胜率。同时给出同期沪深300涨跌幅作基准。
@@ -436,10 +446,22 @@ def review_impl() -> pd.DataFrame:
         return pd.DataFrame()
     if df is None or len(df) == 0:
         return pd.DataFrame()
-    df = df.dropna(subset=["日期", "代码", "现价"]).tail(REVIEW_N)
+    df = df.dropna(subset=["日期", "代码", "现价"]).copy()
     # 同一天可能推送多次（手动重发/冗余触发），用「推送时间」区分批次；旧记录没有该列则留空
     if "推送时间" not in df.columns:
         df["推送时间"] = ""
+    df["日期"] = df["日期"].astype(str).str.strip()
+    df["推送时间"] = df["推送时间"].fillna("").astype(str).str.strip()
+    df["代码"] = df["代码"].astype(str).str.strip().str.zfill(6).str[-6:]
+    _cols = [c for c in ["日期", "推送时间", "代码", "名称", "现价", "买入股数"] if c in df.columns]
+    df = df.drop_duplicates(subset=_cols, keep="last")     # 同一次推送被重复留档 → 去重
+    df = df.sort_values("日期", kind="stable")             # 按日期排序，批次顺序才正确
+    # 同一只票同一天只算一次（当天重复推送不重复计胜负），保留当天最早那次
+    df = df.drop_duplicates(subset=["日期", "代码"], keep="first")
+    df["_batch"] = df["日期"] + " " + df["推送时间"]
+    # 取最近 REVIEW_N 个批次、整批保留（按行 tail 会把一批切成一半，复盘就缺票）
+    _recent = df["_batch"].drop_duplicates().tolist()[-REVIEW_N:]
+    df = df[df["_batch"].isin(_recent)].reset_index(drop=True)
     end_d = dt.date.today()
     idx_s = _index_series(pd.Timestamp(str(df["日期"].min())), end_d)   # 基准指数，只拉一次
     rows = []
@@ -464,7 +486,15 @@ def review_impl() -> pd.DataFrame:
             fh = h[pd.to_datetime(h["日期"]) > rec_date]
             future = fh["收盘"].astype(float).reset_index(drop=True)
             fdates = pd.to_datetime(fh["日期"]).reset_index(drop=True)
-        stop_px, take_px = price0 * (1 - STOP_LOSS_PCT), price0 * (1 + TAKE_PROFIT_PCT)
+        base_px = price0
+        if h is not None and len(h) > 0:
+            _same = h.loc[pd.to_datetime(h["日期"]) == rec_date, "收盘"]
+            if len(_same):
+                _q0 = float(_same.iloc[-1])
+                # 除权/送股会让复权价与推送时的现价错位，偏差>3% 时用当日复权收盘对齐
+                if _q0 > 0 and abs(_q0 / price0 - 1) > 0.03:
+                    base_px = _q0
+        stop_px, take_px = base_px * (1 - STOP_LOSS_PCT), base_px * (1 + TAKE_PROFIT_PCT)
         label, judge_px, judge_i = None, None, None
         n = min(len(future), REVIEW_DAYS)          # 推荐日后已过去的交易日数（最多跟踪20天）
         for i in range(n):                          # 逐日判定，谁先触发算谁
@@ -479,7 +509,7 @@ def review_impl() -> pd.DataFrame:
             if n >= REVIEW_DAYS:
                 judge_i = REVIEW_DAYS - 1
                 judge_px = float(future.iloc[judge_i])
-                label = "🏁到期盈利" if judge_px >= price0 else "🏁到期亏损"
+                label = "🏁到期盈利" if judge_px >= base_px else "🏁到期亏损"
             else:
                 judge_i = n - 1
                 judge_px = float(future.iloc[n - 1]) if n > 0 else price0
@@ -500,9 +530,9 @@ def review_impl() -> pd.DataFrame:
                "代码": code,
                "名称": str(r.get("名称", "")).strip(),
                "推荐价": round(price0, 2), "现价": round(judge_px, 2),
-               "盈亏%": round((judge_px / price0 - 1) * 100, 2), "结果": label,
+               "盈亏%": round((judge_px / base_px - 1) * 100, 2), "结果": label,
                "同期沪深300%": bench,
-               "_盈亏额": round((judge_px - price0) * shares, 1),
+               "_盈亏额": round((judge_px - base_px) * shares, 1),
                "_done": not label.startswith("⏳"), "_saved": 0.0}
         # 止损挽回金额：若止损后继续跌到满期，估算纪律避免了多少额外亏损
         if label == "🛑止损保命" and len(future) >= REVIEW_DAYS:
@@ -549,7 +579,7 @@ def review_conclusion(rv: pd.DataFrame) -> str:
         text += f" 止损纪律避免了约 {saved:.0f} 元额外亏损。"
     return text
 
-APP_VERSION = "v1.17"       # v1.17 滚动样本外验证+因子去冗余+概率校准+组合层风控
+APP_VERSION = "v1.18"       # v1.18 复盘修复（批次/去重/基准）+ 降换手 + 全A扩池 + 实盘OOS台账
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 st.title("📈 每日选股")
@@ -981,7 +1011,7 @@ def allocate(picks: pd.DataFrame, budget0: float,
 
 # ---------------- 历史推荐复盘（打开页面自动执行，无需任何点击） ----------------
 rv = review_performance()
-with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}条，自动更新）", expanded=True):
+with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}批，自动更新）", expanded=True):
     if len(rv) == 0:
         st.caption("暂无历史推荐，有推荐后会自动复盘。")
     else:

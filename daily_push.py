@@ -37,6 +37,8 @@ def _append_log(rec) -> None:
         except Exception:
             old = None
     out = pd.concat([old, rec], ignore_index=True) if old is not None else rec
+    if "推送时间" in out.columns:                 # 旧记录没有该列 → 补空，避免复盘分批时出现 NaN
+        out["推送时间"] = out["推送时间"].fillna("")
     out.to_csv(LOG_FILE, index=False, encoding="utf-8-sig")
 
 
@@ -82,7 +84,7 @@ LOG_FILE = Path(__file__).parent / "推送记录.csv"       # 推送留档，供
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.17"
+APP_VERSION = "v1.18"
 
 
 def _mark_sent_today() -> None:
@@ -266,9 +268,21 @@ def _collect() -> dict:
     # 留档供周末复盘（带上推送时间，同一天多次推送才能在 web 里分开显示）
     rec = plan[["代码", "名称", "现价", "买入股数"]].copy()
     rec.insert(0, "日期", date_str)
-    rec.insert(1, "推送时间", _now_hm())
+    ptime = _now_hm()
+    rec.insert(1, "推送时间", ptime)
     rec["大盘标签"] = d["tag"]
     _append_log(rec)
+    # 实盘 OOS 台账：同一次推送的评分与价格再记一份，事后按5/10日收益滚动算真实IC
+    try:
+        import oos_ledger
+        _sc = {str(s2["代码"]).zfill(6): float(s2["总分"]) for _, s2 in ranked.iterrows()
+               if "总分" in ranked.columns and pd.notna(s2.get("总分"))}
+        oos_ledger.record(date_str, ptime, [
+            {"代码": p["代码"], "名称": p["名称"],
+             "评分": _sc.get(str(p["代码"]).zfill(6)), "现价": float(p["现价"])}
+            for _, p in plan.iterrows()])
+    except Exception as e:
+        print("OOS台账记录失败(不影响推送):", e)
     return d
 
 
