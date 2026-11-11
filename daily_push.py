@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-每日自动推送脚本（由 GitHub Actions 定时触发，周一至周五北京时间 9:00；9:40/10:20 冗余重试，当天已发则跳过）
+每日自动推送脚本（由 GitHub Actions 定时触发，周一至周五北京时间 7:00；7:40/8:20 冗余重试，当天已发则跳过）
 流程：全市场筛选 -> 扣费回测 -> 舆情排雷 -> 本金+收益自动定只数 -> 分配本金 -> QQ邮箱推送
 邮件同时输出 HTML（卡片排版）与纯文本（兜底）两个版本
 """
@@ -15,7 +15,10 @@ STATE_FILE = BASE_DIR / "推送状态.json"    # 记录最后发送日期，供�
 
 
 def _today() -> str:
-    return _datetime.date.today().strftime("%Y-%m-%d")
+    """北京时间的今天。GitHub Actions 运行在 UTC：7:00 北京 = 前一天 23:00 UTC，
+    若用 UTC 日期判重，8:20 那次补发会被当成新的一天而重复发信。"""
+    return (_datetime.datetime.now(_datetime.timezone.utc)
+            + _datetime.timedelta(hours=8)).strftime("%Y-%m-%d")
 
 
 def _already_sent_today() -> bool:
@@ -160,7 +163,7 @@ def build_review(rv: pd.DataFrame) -> dict | None:
 
 # ========== 数据收集：跑完整选股流程，产出渲染用的数据结构 ==========
 def _collect() -> dict:
-    date_str = pd.Timestamp.now().strftime("%Y-%m-%d")
+    date_str = _today()
     idx_close, idx_ma60, cold = app.market_temperature_impl()
     d = {
         "date": date_str,
@@ -528,7 +531,7 @@ def send(text: str, html: str):
     msg = MIMEMultipart("alternative")
     msg["From"] = TO_ADDR
     msg["To"] = TO_ADDR
-    msg["Subject"] = Header(f"【{tag}】每日选股 {pd.Timestamp.now().strftime('%m-%d')}", "utf-8")
+    msg["Subject"] = Header(f"【{tag}】每日选股 {_today()[5:]}", "utf-8")
     # 顺序不能反：先纯文本后 HTML，客户端会优先显示最后一段
     msg.attach(MIMEText(text, "plain", "utf-8"))
     msg.attach(MIMEText(html, "html", "utf-8"))

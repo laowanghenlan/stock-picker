@@ -110,7 +110,8 @@ def send_email_with_results(plan, mined, capital, leftover, cold, idx_close, idx
         os.environ.setdefault("QQ_AUTH_CODE", auth)
         import daily_push
         d = {
-            "date": pd.Timestamp.now().strftime("%Y-%m-%d"),
+            # 北京时间（Streamlit Cloud 运行在 UTC，凌晨点击时 UTC 还是前一天）
+            "date": (pd.Timestamp.now(tz="UTC") + pd.Timedelta(hours=8)).strftime("%Y-%m-%d"),
             "tag": "低温期" if cold else "回暖期",
             "cold": bool(cold),
             "idx_close": float(idx_close),
