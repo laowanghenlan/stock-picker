@@ -531,7 +531,7 @@ def review_conclusion(rv: pd.DataFrame) -> str:
         text += f" 止损纪律避免了约 {saved:.0f} 元额外亏损。"
     return text
 
-APP_VERSION = "v1.10"       # v1.10 稳定性：全市场快照加100秒硬超时（防东财限流导致无限转圈），失败10分钟内不重试并降级用缓存
+APP_VERSION = "v1.11"       # v1.11 行情双源：东财限流时自动降级腾讯批量接口，100秒硬超时+10分钟冷却，修云端无限转圈
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 st.title("📈 每日选股")
@@ -961,7 +961,7 @@ if run:
                     refresh_spot()
             except Exception as e:
                 if _cache_tag == "无缓存":
-                    st.error(f"行情接口无响应，且本地没有可用缓存，暂时无法选股（{e}）。"
+                    st.error(f"行情接口无响应（东财+腾讯备用源均失败），且本地没有可用缓存，暂时无法选股（{e}）。"
                              "云端刚重启时首次拉取较慢，请过几分钟再点一次。")
                     st.stop()
                 st.warning(f"行情刷新失败，沿用 {_cache_tag} 的缓存继续：{e}")

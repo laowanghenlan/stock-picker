@@ -7,12 +7,18 @@ from pathlib import Path
 
 import akshare as ak
 import pandas as pd
+import requests
 import streamlit as st
 
 # 全市场快照的磁盘缓存文件：进程重启后仍可直接读盘，避免每次启动都联网拉取
 _SPOT_FILE = Path(__file__).parent / "spot_cache.csv"
-_SPOT_TIMEOUT = 100        # 全市场快照的硬超时（秒）。慢网正常约60~80秒，超过说明被限流
-_spot_fail_at = 0.0        # 上次拉取失败的时刻：10分钟内不再重试，避免每次点击都卡满超时
+_CODE_FILE = Path(__file__).parent / "code_list.csv"   # 全A代码表：腾讯备用源的代码来源（随仓库提交）
+_SPOT_TIMEOUT = 100        # 东财全市场快照的硬超时（秒）。慢网正常约60~80秒，超过说明被限流
+_TX_BATCH = 600            # 腾讯批量接口单次请求的股票数
+_TX_TIMEOUT = 15           # 腾讯单批请求超时（秒）
+_TX_WORKERS = 6            # 腾讯分片并发数
+_spot_fail_at = 0.0        # 所有数据源都失败的时刻：10分钟内不再重试，避免每次点击都卡满超时
+_em_fail_at = 0.0          # 东财失败时刻：30分钟内直接走腾讯，不再白等100秒
 
 
 def _read_spot_cache() -> pd.DataFrame | None:
@@ -26,28 +32,114 @@ def _read_spot_cache() -> pd.DataFrame | None:
         return None
 
 
-def _fetch_spot() -> pd.DataFrame:
-    """联网拉取全市场快照（约1分钟）并写入本地缓存。
-    akshare 内部请求没有超时，云端 IP 被东财限流时会无限挂起（页面一直转圈），
-    这里用线程加硬超时，超时抛 TimeoutError 交给上层降级用缓存。"""
-    global _spot_fail_at
-    ex = ThreadPoolExecutor(max_workers=1)
-    fut = ex.submit(ak.stock_zh_a_spot_em)
-    try:
-        df = fut.result(timeout=_SPOT_TIMEOUT)
-    except FuturesTimeout:
-        _spot_fail_at = time.time()
-        raise TimeoutError(f"行情接口 {_SPOT_TIMEOUT} 秒无响应，可能被限流或网络不通")
-    except Exception:
-        _spot_fail_at = time.time()
-        raise
-    finally:
-        ex.shutdown(wait=False)       # 不等待卡住的线程，立即把控制权交回页面
+def _write_spot_cache(df: pd.DataFrame) -> None:
+    """快照落盘，供下次启动秒开；写盘失败不影响本次使用"""
     try:
         df.to_csv(_SPOT_FILE, index=False, encoding="utf-8-sig")
     except Exception:
-        pass                           # 写盘失败不影响本次使用
-    return df
+        pass
+
+
+def _all_codes() -> list[str]:
+    """全A代码表：优先用本地快照缓存里的代码（最新），没有则读仓库里的 code_list.csv。
+    北交所（4/8/920 开头）小资金买不了，不请求，省一批流量。"""
+    codes: list[str] = []
+    cached = _read_spot_cache()
+    if cached is not None and "代码" in cached.columns:
+        codes = cached["代码"].astype(str).str.zfill(6).tolist()
+    elif _CODE_FILE.exists():
+        try:
+            codes = pd.read_csv(_CODE_FILE, dtype={"code": str})["code"].astype(str).str.zfill(6).tolist()
+        except Exception:
+            codes = []
+    return [c for c in dict.fromkeys(codes) if not c.startswith(("4", "8", "920"))]
+
+
+def _fetch_spot_em() -> pd.DataFrame:
+    """东财全市场快照（一次请求拿全市场，约60~80秒）。
+    akshare 内部请求没有超时，云端 IP 被东财限流时会无限挂起（页面一直转圈），
+    这里用线程加硬超时，超时后由上层换腾讯备用源。"""
+    global _em_fail_at
+    ex = ThreadPoolExecutor(max_workers=1)
+    fut = ex.submit(ak.stock_zh_a_spot_em)
+    try:
+        return fut.result(timeout=_SPOT_TIMEOUT)
+    except FuturesTimeout:
+        _em_fail_at = time.time()
+        raise TimeoutError(f"东财行情接口 {_SPOT_TIMEOUT} 秒无响应，可能被限流或网络不通")
+    except Exception:
+        _em_fail_at = time.time()
+        raise
+    finally:
+        ex.shutdown(wait=False)       # 不等待卡住的线程，立即把控制权交回页面
+
+
+def _fetch_spot_tx() -> pd.DataFrame:
+    """腾讯行情批量接口兜底：每批600只、6路并发，通常5秒内拿全市场。
+    字段位置（~分隔）：1名称 2代码 3现价 4昨收 5今开 31涨跌额 32涨跌幅 33最高 34最低
+    36成交量(手) 37成交额(万元) 38换手率 39市盈率TTM 43振幅 44流通市值(亿) 45总市值(亿)
+    46市净率 49量比 52市盈率(动) 53市盈率(静)"""
+    codes = _all_codes()
+    if not codes:
+        raise RuntimeError("没有可用的股票代码表（code_list.csv 缺失）")
+    batches = [codes[i:i + _TX_BATCH] for i in range(0, len(codes), _TX_BATCH)]
+
+    def fetch(batch: list[str]) -> list[str]:
+        q = ",".join(("sh" if c.startswith(("6", "9")) else "sz") + c for c in batch)
+        r = requests.get(f"https://qt.gtimg.cn/q={q}", timeout=_TX_TIMEOUT,
+                         headers={"Referer": "https://gu.qq.com/"})
+        r.encoding = "gbk"
+        return r.text.split(";")
+
+    def num(f: list[str], i: int) -> float:
+        try:
+            return float(f[i])
+        except Exception:
+            return float("nan")
+
+    rows = []
+    with ThreadPoolExecutor(max_workers=_TX_WORKERS) as ex:
+        for lines in ex.map(fetch, batches):
+            for ln in lines:
+                f = ln.split("~")
+                if len(f) < 54:
+                    continue
+                pe_dyn = num(f, 52)
+                if pe_dyn != pe_dyn:          # 停牌/无动态PE时退回TTM
+                    pe_dyn = num(f, 39)
+                rows.append({
+                    "代码": f[2].zfill(6), "名称": f[1], "最新价": num(f, 3),
+                    "涨跌幅": num(f, 32), "涨跌额": num(f, 31),
+                    "成交量": num(f, 36), "成交额": num(f, 37) * 1e4,
+                    "振幅": num(f, 43), "最高": num(f, 33), "最低": num(f, 34),
+                    "今开": num(f, 5), "昨收": num(f, 4),
+                    "换手率": num(f, 38), "量比": num(f, 49),
+                    "市盈率-动态": pe_dyn, "市净率": num(f, 46),
+                    "总市值": num(f, 45) * 1e8, "流通市值": num(f, 44) * 1e8,
+                })
+    if len(rows) < 100:
+        raise RuntimeError(f"腾讯备用源只返回 {len(rows)} 条数据，判定为异常")
+    return pd.DataFrame(rows)
+
+
+def _fetch_spot() -> pd.DataFrame:
+    """拉全市场快照：东财优先（一次拿全），失败或超时自动降级腾讯批量接口。
+    东财30分钟内翻过车就直接走腾讯，避免每次点击都白等100秒。"""
+    global _spot_fail_at
+    if time.time() - _em_fail_at >= 1800:
+        try:
+            df = _fetch_spot_em()
+            _write_spot_cache(df)
+            return df
+        except Exception:
+            pass
+    try:
+        df = _fetch_spot_tx()
+        _write_spot_cache(df)
+        return df
+    except Exception:
+        _spot_fail_at = time.time()       # 两个源都挂了才记录，用于界面10分钟冷却提示
+        raise
 
 
 def spot_cache_time() -> str:
