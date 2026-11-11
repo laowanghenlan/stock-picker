@@ -611,15 +611,19 @@ def review_conclusion(rv: pd.DataFrame) -> str:
         text += f" 止损纪律避免了约 {saved:.0f} 元额外亏损。"
     return text
 
-APP_VERSION = "v1.18"       # v1.18 复盘修复（批次/去重/基准）+ 降换手 + 全A扩池 + 实盘OOS台账
+APP_VERSION = "v1.18.3"     # v1.18.3 大盘温度增加超时降级，避免云端启动白屏
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 st.title("📈 每日选股")
 st.caption(APP_VERSION)
 
 # ---------------- 大盘温度横幅（低温期提示空仓） ----------------
-idx_close, idx_ma60, market_cold = market_temperature()
-if market_cold:
+_idx_result = _run_with_timeout(market_temperature, timeout=10)
+idx_close, idx_ma60, market_cold = _idx_result or (0.0, 0.0, False)
+if idx_close <= 0 or idx_ma60 <= 0:
+    st.warning("大盘温度暂时不可用（行情接口超时），已跳过检查，不影响选股和复盘。")
+    force_run = True
+elif market_cold:
     st.error(f"❄️ 大盘低温期：沪深300（{idx_close:.0f}）在60日线（{idx_ma60:.0f}）下方，"
              f"系统性下跌段。默认建议空仓，执意选股请勾选下方开关。")
     force_run = st.checkbox("我知道风险，仍要选股")
