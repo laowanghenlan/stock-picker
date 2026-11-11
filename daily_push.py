@@ -92,6 +92,10 @@ def _collect() -> dict:
         "n_picks": 0,
         "invest": 0.0,
         "left": 0.0,
+        "exp_win": 0.0,       # 全止盈最好情形
+        "exp_loss": 0.0,      # 全止损最坏情形
+        "exp_pnl": 0.0,       # 按胜率加权的预期盈亏
+        "max_drawdown": 0.0,  # 组合内最大回撤（最差那只）
         "review": None,       # 复盘摘要
         "note": "",           # 提前结束的单一提示（空仓等）
     }
@@ -121,13 +125,47 @@ def _collect() -> dict:
     d["n_picks"] = int(n_picks)
     d["invest"] = float(plan["投入(含佣金)"].sum())
     d["left"] = float(d["capital"] - d["invest"])
-    d["plan"] = [{
-        "名称": p["名称"], "代码": p["代码"], "现价": float(p["现价"]),
-        "股数": int(p["买入股数"]), "投入": float(p["投入(含佣金)"]),
-        "盈利概率": float(p["盈利概率"]),
-        "止损": float(p["止损价(买入价×0.95)"]),
-        "止盈": float(p["止盈参考(买入价×1.10)"]),
-    } for _, p in plan.iterrows()]
+    # 选股阶段的回测/行情字段（best_plan 只带价格，其余从 ranked 里按代码回查）
+    src_map = {str(s["代码"]).zfill(6): s for _, s in ranked.iterrows()}
+
+    def _num(code: str, key: str, default=0.0) -> float:
+        try:
+            v = src_map[code][key]
+            return default if pd.isna(v) else float(v)
+        except Exception:
+            return default
+
+    items = []
+    for _, p in plan.iterrows():
+        code = str(p["代码"]).zfill(6)
+        invest = float(p["投入(含佣金)"])
+        est_win = float(p["预计盈利(元)"])
+        est_loss = float(p["预计亏损(元)"])           # 已是负数
+        items.append({
+            "名称": p["名称"], "代码": code, "现价": float(p["现价"]),
+            "股数": int(p["买入股数"]), "投入": invest,
+            "仓位占比": invest / d["capital"] * 100 if d["capital"] else 0.0,
+            "盈利概率": float(p["盈利概率"]),
+            "止损": float(p["止损价(买入价×0.95)"]),
+            "止盈": float(p["止盈参考(买入价×1.10)"]),
+            "今日涨跌": _num(code, "今日涨跌"),
+            "量比": _num(code, "量比"),
+            "行业": str(src_map.get(code, {}).get("行业", "") or ""),
+            "回测收益": _num(code, "扣费总收益"),
+            "回测胜率": _num(code, "胜率"),
+            "最大回撤": _num(code, "最大回撤"),
+            "交易次数": int(_num(code, "交易次数")),
+            "预计盈利": est_win,
+            "预计亏损": est_loss,
+            "盈亏比": est_win / abs(est_loss) if est_loss else 0.0,
+        })
+    d["plan"] = items
+    # 组合层：预期收益（按胜率加权）、全止损最坏情形、全止盈最好情形
+    d["exp_win"] = sum(i["预计盈利"] for i in items)
+    d["exp_loss"] = sum(i["预计亏损"] for i in items)
+    d["exp_pnl"] = sum(i["盈利概率"] / 100 * i["预计盈利"] + (1 - i["盈利概率"] / 100) * i["预计亏损"]
+                       for i in items)
+    d["max_drawdown"] = min([i["最大回撤"] for i in items], default=0.0)
 
     # —— 复盘摘要：直接附在邮件里，连网页都不用点开 ——
     try:
@@ -153,7 +191,9 @@ def _collect() -> dict:
                 for _, r2 in rv.head(5).iterrows():  # 最多列最近5条明细
                     r["rows"].append({
                         "日期": str(r2["日期"]), "名称": r2["名称"],
+                        "推荐价": float(r2["推荐价"]), "现价": float(r2["现价"]),
                         "结果": r2["结果"], "盈亏%": float(r2["盈亏%"]),
+                        "盈亏额": float(r2["_盈亏额"]),
                     })
                 r["conclusion"] = app.review_conclusion(rv)
                 d["review"] = r
@@ -193,12 +233,28 @@ def _render_text(d: dict) -> str:
     lines.append("")
     for p in d["plan"]:
         lines.append(
-            f"{p['名称']}（{p['代码']}）现价 {p['现价']:.2f} 元 | "
-            f"买入 {p['股数']} 股 约 {p['投入']:.0f} 元 | "
-            f"盈利概率 {p['盈利概率']:.0f}% | "
-            f"止损=买入价×0.95（约 {p['止损']:.2f} 元） | "
-            f"止盈=买入价×1.10（约 {p['止盈']:.2f} 元）"
+            f"【{p['名称']}】{p['代码']}"
+            + (f" · {p['行业']}" if p["行业"] else "")
         )
+        lines.append(
+            f"  现价 {p['现价']:.2f} 元（今日 {p['今日涨跌']:+.2f}%） | "
+            f"推荐价 {p['现价']:.2f} 元 | 买入 {p['股数']} 股 约 {p['投入']:.0f} 元"
+            f"（仓位 {p['仓位占比']:.0f}%）"
+        )
+        lines.append(
+            f"  止损 {p['止损']:.2f} / 止盈 {p['止盈']:.2f} | "
+            f"预计盈利 {p['预计盈利']:+.0f} 元 / 预计亏损 {p['预计亏损']:+.0f} 元"
+            f"（盈亏比 {p['盈亏比']:.1f}）"
+        )
+        lines.append(
+            f"  回测：收益 {p['回测收益']:+.1f}% · 胜率 {p['回测胜率']:.0f}% · "
+            f"最大回撤 {p['最大回撤']:.1f}% · 交易 {p['交易次数']} 次 · 量比 {p['量比']:.2f}"
+        )
+    lines.append("")
+    lines.append(
+        f"组合预期：按胜率加权 {d['exp_pnl']:+.0f} 元 | "
+        f"全部止盈最好 {d['exp_win']:+.0f} 元 | 全部止损最坏 {d['exp_loss']:+.0f} 元"
+    )
 
     r = d["review"]
     if r:
@@ -208,7 +264,8 @@ def _render_text(d: dict) -> str:
         if r["bench"] is not None:
             lines.append(f"同期沪深300平均 {r['bench']:+.1f}% | 平均超额 {r['excess']:+.1f}%")
         for x in r["rows"]:
-            lines.append(f"  {x['日期']} {x['名称']} {x['结果']} {x['盈亏%']:+.1f}%")
+            lines.append(f"  {x['日期']} {x['名称']} 推荐价 {x['推荐价']:.2f} → 现价 {x['现价']:.2f} "
+                         f"{x['结果']} {x['盈亏%']:+.1f}%（{x['盈亏额']:+.0f} 元）")
         lines.append("结论：" + r["conclusion"])
 
     lines += ["", "纪律：跌破止损价无条件卖出；持有超20个交易日不涨也卖。",
@@ -285,24 +342,67 @@ def _render_html(d: dict) -> str:
                  f"<div style=\"font-size:18px;font-weight:700;color:#1f2328;\">{val}</div></td>")
     h.append("</tr></table>")
 
-    # —— 推荐卡片 ——
+    # —— 组合预期（按胜率加权 / 最好 / 最坏） ——
+    pnl_color = "#d93025" if d["exp_pnl"] >= 0 else "#1a7f37"
+    h.append("<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" "
+             "style=\"background:#f7f9fc;border-radius:12px;margin:-8px 0 20px;\"><tr>")
+    for label, val, color in [("组合预期收益", f"{d['exp_pnl']:+.0f} 元", pnl_color),
+                              ("全部止盈最好", f"{d['exp_win']:+.0f} 元", "#d93025"),
+                              ("全部止损最坏", f"{d['exp_loss']:+.0f} 元", "#1a7f37"),
+                              ("最大回撤", f"{d['max_drawdown']:.1f}%", "#57606a")]:
+        h.append(f"<td align=\"center\" style=\"padding:12px 4px;\">"
+                 f"<div style=\"font-size:11.5px;color:#8b949e;margin-bottom:4px;\">{label}</div>"
+                 f"<div style=\"font-size:15px;font-weight:700;color:{color};\">{val}</div></td>")
+    h.append("</tr></table>")
+    # —— 推荐卡片（现价/推荐价/盈亏/回测 全部展开） ——
     for p in d["plan"]:
+        chg_color = "#d93025" if p["今日涨跌"] >= 0 else "#1a7f37"   # A股：红涨绿跌
         h.append("<div style=\"border:1px solid #e6e9ee;border-radius:12px;padding:16px 18px;"
                  "margin-bottom:12px;\">")
+        # 标题行：名称/代码/行业 + 现价与今日涨跌
         h.append("<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\"><tr>"
                  f"<td style=\"font-size:16px;font-weight:700;color:#1f2328;\">{p['名称']}"
-                 f"<span style=\"font-size:12px;color:#8b949e;font-weight:400;\"> {p['代码']}</span></td>"
-                 f"<td align=\"right\" style=\"font-size:19px;font-weight:700;color:#1a73e8;\">"
-                 f"{p['现价']:.2f}</td></tr></table>")
+                 f"<span style=\"font-size:12px;color:#8b949e;font-weight:400;\"> {p['代码']}</span>"
+                 + (f"<span style=\"font-size:11.5px;color:#8b949e;font-weight:400;\"> · {p['行业']}</span>"
+                    if p["行业"] else "")
+                 + f"</td><td align=\"right\" style=\"font-size:19px;font-weight:700;color:{chg_color};\">"
+                 f"{p['现价']:.2f}<span style=\"font-size:12px;margin-left:6px;\">"
+                 f"{p['今日涨跌']:+.2f}%</span></td></tr></table>")
+
+        # 推荐价 / 买入 / 投入 / 仓位 / 止损 / 止盈 / 盈亏比
         h.append("<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" "
-                 "style=\"margin-top:12px;font-size:13px;color:#57606a;\">")
-        h.append(f"<tr><td style=\"padding:3px 0;\">买入 <b style=\"color:#1f2328;\">{p['股数']} 股</b></td>"
-                 f"<td style=\"padding:3px 0;\">投入 <b style=\"color:#1f2328;\">{p['投入']:.0f} 元</b></td>"
-                 f"<td style=\"padding:3px 0;\">盈利概率 <b style=\"color:#1a7f37;\">"
-                 f"{p['盈利概率']:.0f}%</b></td></tr>")
-        h.append(f"<tr><td style=\"padding:3px 0;color:#d93025;\">止损 {p['止损']:.2f}</td>"
-                 f"<td colspan=\"2\" style=\"padding:3px 0;color:#1a7f37;\">止盈 {p['止盈']:.2f}</td></tr>")
-        h.append("</table></div>")
+                 "style=\"margin-top:12px;font-size:13px;color:#57606a;border-collapse:collapse;\">")
+        h.append(f"<tr><td style=\"padding:4px 0;\">推荐价 <b style=\"color:#1a73e8;\">{p['现价']:.2f}</b></td>"
+                 f"<td style=\"padding:4px 0;\">买入 <b style=\"color:#1f2328;\">{p['股数']} 股</b></td>"
+                 f"<td style=\"padding:4px 0;\">投入 <b style=\"color:#1f2328;\">{p['投入']:.0f} 元</b>"
+                 f"<span style=\"color:#9aa4b1;\">（仓位 {p['仓位占比']:.0f}%）</span></td></tr>")
+        h.append(f"<tr><td style=\"padding:4px 0;color:#1a7f37;\">止损 <b>{p['止损']:.2f}</b></td>"
+                 f"<td style=\"padding:4px 0;color:#d93025;\">止盈 <b>{p['止盈']:.2f}</b></td>"
+                 f"<td style=\"padding:4px 0;\">盈亏比 <b style=\"color:#1f2328;\">{p['盈亏比']:.1f}</b></td></tr>")
+        h.append("</table>")
+
+        # 预期盈亏条：历史胜率 / 预计盈利 / 预计亏损 / 量比
+        h.append("<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" "
+                 "style=\"margin-top:10px;background:#f7f9fc;border-radius:8px;\"><tr>")
+        h.append(f"<td align=\"center\" style=\"padding:9px 4px;\">"
+                 f"<div style=\"font-size:11px;color:#8b949e;\">历史胜率</div>"
+                 f"<div style=\"font-size:14px;font-weight:700;color:#1a73e8;\">{p['盈利概率']:.0f}%</div></td>")
+        h.append(f"<td align=\"center\" style=\"padding:9px 4px;\">"
+                 f"<div style=\"font-size:11px;color:#8b949e;\">预计盈利</div>"
+                 f"<div style=\"font-size:14px;font-weight:700;color:#d93025;\">{p['预计盈利']:+.0f} 元</div></td>")
+        h.append(f"<td align=\"center\" style=\"padding:9px 4px;\">"
+                 f"<div style=\"font-size:11px;color:#8b949e;\">预计亏损</div>"
+                 f"<div style=\"font-size:14px;font-weight:700;color:#1a7f37;\">{p['预计亏损']:+.0f} 元</div></td>")
+        h.append(f"<td align=\"center\" style=\"padding:9px 4px;\">"
+                 f"<div style=\"font-size:11px;color:#8b949e;\">量比</div>"
+                 f"<div style=\"font-size:14px;font-weight:700;color:#1f2328;\">{p['量比']:.2f}</div></td>")
+        h.append("</tr></table>")
+
+        # 回测明细（一行小字）
+        h.append(f"<div style=\"font-size:11.5px;color:#9aa4b1;margin-top:10px;\">"
+                 f"回测：收益 {p['回测收益']:+.1f}% · 胜率 {p['回测胜率']:.0f}% · "
+                 f"最大回撤 {p['最大回撤']:.1f}% · 交易 {p['交易次数']} 次</div>")
+        h.append("</div>")
 
     # —— 复盘 ——
     r = d["review"]
@@ -315,7 +415,7 @@ def _render_html(d: dict) -> str:
         for label, val, color in [("已出结果", f"{r['done']} 笔", "#1f2328"),
                                   ("胜率", f"{r['winrate']:.0f}%", "#1a7f37"),
                                   ("累计盈亏", f"{r['pnl']:+.0f} 元",
-                                   "#1a7f37" if r["pnl"] >= 0 else "#d93025")]:
+                                   "#d93025" if r["pnl"] >= 0 else "#1a7f37")]:
             h.append(f"<td align=\"center\"><div style=\"font-size:11.5px;color:#8b949e;\">{label}</div>"
                      f"<div style=\"font-size:16px;font-weight:700;color:{color};margin-top:3px;\">"
                      f"{val}</div></td>")
@@ -329,15 +429,19 @@ def _render_html(d: dict) -> str:
             h.append("<tr style=\"color:#9aa4b1;font-size:11.5px;\">"
                      "<td style=\"padding:6px 0;border-bottom:1px solid #eef1f4;\">日期</td>"
                      "<td style=\"border-bottom:1px solid #eef1f4;\">名称</td>"
+                     "<td align=\"right\" style=\"border-bottom:1px solid #eef1f4;\">推荐价→现价</td>"
                      "<td align=\"right\" style=\"border-bottom:1px solid #eef1f4;\">结果</td>"
                      "<td align=\"right\" style=\"border-bottom:1px solid #eef1f4;\">盈亏</td></tr>")
             for x in r["rows"]:
-                c = "#1a7f37" if x["盈亏%"] >= 0 else "#d93025"
+                c = "#d93025" if x["盈亏%"] >= 0 else "#1a7f37"      # A股：红涨绿跌
                 h.append(f"<tr><td style=\"padding:7px 0;border-bottom:1px solid #f4f6f9;\">{x['日期']}</td>"
                          f"<td style=\"border-bottom:1px solid #f4f6f9;\">{x['名称']}</td>"
+                         f"<td align=\"right\" style=\"border-bottom:1px solid #f4f6f9;\">"
+                         f"{x['推荐价']:.2f}→{x['现价']:.2f}</td>"
                          f"<td align=\"right\" style=\"border-bottom:1px solid #f4f6f9;\">{x['结果']}</td>"
                          f"<td align=\"right\" style=\"border-bottom:1px solid #f4f6f9;color:{c};\">"
-                         f"{x['盈亏%']:+.1f}%</td></tr>")
+                         f"{x['盈亏%']:+.1f}%<br><span style=\"font-size:11px;\">"
+                         f"{x['盈亏额']:+.0f} 元</span></td></tr>")
             h.append("</table>")
         if r["conclusion"]:
             h.append(f"<div style=\"font-size:12.5px;color:#57606a;margin-top:10px;line-height:1.7;\">"
