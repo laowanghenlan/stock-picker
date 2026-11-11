@@ -1041,44 +1041,47 @@ def allocate(picks: pd.DataFrame, budget0: float,
     return df, leftover
 
 
-# ---------------- 历史推荐复盘（打开页面自动执行，无需任何点击） ----------------
-rv = review_performance()
-with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}批，自动更新）", expanded=True):
-    if len(rv) == 0:
-        st.caption("暂无历史推荐，有推荐后会自动复盘。")
+# ---------------- 历史推荐复盘（按需加载，避免云端启动时网络 hang 导致白屏） ----------------
+with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}批）", expanded=False):
+    if not st.button("🔄 加载复盘数据", key="load_review"):
+        st.caption("点击上方按钮加载复盘（需联网拉历史行情，约10~20秒）。"
+                   "云端启动时不自动执行，避免数据源 hang 住拖垮整个页面。")
     else:
-        done = rv[rv["_done"]]
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("推荐总数", f"{len(rv)} 条")
-        if len(done) > 0:
-            wins = int(done["结果"].isin(["🎯止盈", "🏁到期盈利"]).sum())
-            m2.metric("胜率", f"{wins / len(done) * 100:.0f}%（{wins}/{len(done)}）")
-            m3.metric("平均每笔盈亏", f"{done['盈亏%'].mean():+.2f}%")
-            m4.metric("累计盈亏", f"{done['_盈亏额'].sum():+.0f} 元")
+        rv = review_performance()
+        if len(rv) == 0:
+            st.caption("暂无历史推荐，有推荐后会自动复盘。")
         else:
-            m2.metric("胜率", "—")
-            m3.metric("平均每笔盈亏", "—")
-            m4.metric("累计盈亏", "—")
-        _cols = ["名称", "推荐价", "现价", "盈亏%", "同期沪深300%", "结果"]
-        _col_fmt = {"盈亏%": st.column_config.NumberColumn(format="%+.2f%%"),
-                    "同期沪深300%": st.column_config.NumberColumn(format="%+.2f%%")}
-        # 按推送批次（日期+时间）分组显示，批次之间用红色横线隔开：
-        # 既区分不同日期，也区分同一天里第几次推送
-        for i, (_, g) in enumerate(rv.groupby("_batch", sort=False)):
-            if i:
-                st.markdown("<hr style='border:none;border-top:2px solid #ff4b4b;margin:12px 0'>",
-                            unsafe_allow_html=True)
-            _day, _tm = g["日期"].iloc[0], g["推送时间"].iloc[0]
-            _when = f"{_day} {_tm}" if _tm else _day
-            st.markdown(f"**📅 {_when} 推送 · {len(g)} 只**")
-            st.dataframe(g[_cols], width="stretch", hide_index=True, column_config=_col_fmt)
-        st.info("💡 " + review_conclusion(rv))
-        if len(done) < 30:
-            st.caption(f"⚠️ 已出结果仅 {len(done)} 笔（<30），统计意义不足，结论别太当真；"
-                       "攒到30~60笔后再看胜率才有参考价值。")
-        st.caption("判定规则：推荐日后最长跟踪20个交易日，收盘涨超+10%为🎯止盈、跌破-5%为🛑止损；"
-                   "满20日未触发按到期收盘定盈亏（🏁）；现价为止盈/止损触发价或最新收盘；"
-                   "未满20日且未触发的标 ⏳持有中，不计入胜率。")
+            done = rv[rv["_done"]]
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("推荐总数", f"{len(rv)} 条")
+            if len(done) > 0:
+                wins = int(done["结果"].isin(["🎯止盈", "🏁到期盈利"]).sum())
+                m2.metric("胜率", f"{wins / len(done) * 100:.0f}%（{wins}/{len(done)}）")
+                m3.metric("平均每笔盈亏", f"{done['盈亏%'].mean():+.2f}%")
+                m4.metric("累计盈亏", f"{done['_盈亏额'].sum():+.0f} 元")
+            else:
+                m2.metric("胜率", "—")
+                m3.metric("平均每笔盈亏", "—")
+                m4.metric("累计盈亏", "—")
+            _cols = ["名称", "推荐价", "现价", "盈亏%", "同期沪深300%", "结果"]
+            _col_fmt = {"盈亏%": st.column_config.NumberColumn(format="%+.2f%%"),
+                        "同期沪深300%": st.column_config.NumberColumn(format="%+.2f%%")}
+            # 按推送批次（日期+时间）分组显示，批次之间用红色横线隔开
+            for i, (_, g) in enumerate(rv.groupby("_batch", sort=False)):
+                if i:
+                    st.markdown("<hr style='border:none;border-top:2px solid #ff4b4b;margin:12px 0'>",
+                                unsafe_allow_html=True)
+                _day, _tm = g["日期"].iloc[0], g["推送时间"].iloc[0]
+                _when = f"{_day} {_tm}" if _tm else _day
+                st.markdown(f"**📅 {_when} 推送 · {len(g)} 只**")
+                st.dataframe(g[_cols], width="stretch", hide_index=True, column_config=_col_fmt)
+            st.info("💡 " + review_conclusion(rv))
+            if len(done) < 30:
+                st.caption(f"⚠️ 已出结果仅 {len(done)} 笔（<30），统计意义不足，结论别太当真；"
+                           "攒到30~60笔后再看胜率才有参考价值。")
+            st.caption("判定规则：推荐日后最长跟踪20个交易日，收盘涨超+10%为🎯止盈、跌破-5%为🛑止损；"
+                       "满20日未触发按到期收盘定盈亏（🏁）；现价为止盈/止损触发价或最新收盘；"
+                       "未满20日且未触发的标 ⏳持有中，不计入胜率。")
 
 # ---------------- 页面：一个按钮 + 一张结果表 ----------------
 st.caption(f"本金 {capital:.0f} 元 · 只数由本金+预期收益自动优化 · 股价上限 {MAX_PRICE:.1f} 元 · "
