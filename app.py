@@ -137,6 +137,7 @@ def send_email_with_results(plan, mined, capital, leftover, cold, idx_close, idx
             "left": float(leftover),
             "exp_win": 0.0, "exp_loss": 0.0, "exp_pnl": 0.0, "max_drawdown": 0.0,
             "review": None,
+            "last": None,
             "note": "",
         }
         # 组合层：按胜率加权的预期收益 / 全止盈最好 / 全止损最坏（与定时邮件同口径）
@@ -149,6 +150,7 @@ def send_email_with_results(plan, mined, capital, leftover, cold, idx_close, idx
         # 复盘摘要：复用 app 的复盘逻辑，失败不影响发邮件
         try:
             rv = review_impl()
+            d["last"] = daily_push.build_last_batch(rv)      # 上一次推送现在赚了还是亏了
             if rv is not None and len(rv) > 0:
                 done = rv[rv["_done"]]
                 if len(done) > 0:
@@ -486,6 +488,7 @@ def review_impl() -> pd.DataFrame:
                 bench = None
         row = {"日期": rec_date.strftime("%Y-%m-%d"),
                "推送时间": ("" if pd.isna(r.get("推送时间")) else str(r.get("推送时间")).strip()),
+               "代码": code,
                "名称": str(r.get("名称", "")).strip(),
                "推荐价": round(price0, 2), "现价": round(judge_px, 2),
                "盈亏%": round((judge_px / price0 - 1) * 100, 2), "结果": label,
@@ -537,7 +540,7 @@ def review_conclusion(rv: pd.DataFrame) -> str:
         text += f" 止损纪律避免了约 {saved:.0f} 元额外亏损。"
     return text
 
-APP_VERSION = "v1.14"       # v1.14 复盘按推送批次（日期+时间）分批显示，同一天多次推送也用红线隔开
+APP_VERSION = "v1.15"       # v1.15 邮件新增「上一次推送表现」：逐只 推荐价→现价、盈亏%与盈亏金额、合计
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 st.title("📈 每日选股")

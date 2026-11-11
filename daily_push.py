@@ -27,8 +27,9 @@ def _now_hm() -> str:
             + _datetime.timedelta(hours=8)).strftime("%H:%M")
 
 
-def _append_log(rec: pd.DataFrame) -> None:
-    """追加推送记录。列结构可能变化（新增「推送时间」），整表重写避免追加时列错位。"""
+def _append_log(rec) -> None:
+    """追加推送记录。列结构可能变化（新增「推送时间」），整表重写避免追加时列错位。
+    注：pandas / LOG_FILE 在本文件稍后导入，这里不加类型注解以免定义期求值报错。"""
     old = None
     if LOG_FILE.exists():
         try:
@@ -81,7 +82,7 @@ LOG_FILE = Path(__file__).parent / "推送记录.csv"       # 推送留档，供
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.14"
+APP_VERSION = "v1.15"
 
 
 def _mark_sent_today() -> None:
@@ -180,6 +181,28 @@ def build_review(rv: pd.DataFrame) -> dict | None:
 
 
 # ========== 数据收集：跑完整选股流程，产出渲染用的数据结构 ==========
+def build_last_batch(rv: pd.DataFrame) -> dict | None:
+    """上一次推送（今天之前的最近一批）的逐只表现：赚了还是亏了、赚亏多少钱。
+    邮件里放在今日推荐之前，一眼看到上一批的成绩。"""
+    if rv is None or len(rv) == 0:
+        return None
+    prev = rv[rv["日期"].astype(str) < _today()]
+    if len(prev) == 0:
+        return None
+    day = str(prev["日期"].astype(str).max())
+    g = prev[prev["日期"].astype(str) == day]
+    tms = sorted(t for t in (g["推送时间"].unique() if "推送时间" in g.columns else []) if t)
+    if tms:                                  # 同一天推送多批，取最晚那批
+        g = g[g["推送时间"] == tms[-1]]
+    rows = [{"名称": str(x["名称"]), "推荐价": float(x["推荐价"]), "现价": float(x["现价"]),
+             "盈亏%": float(x["盈亏%"]), "盈亏额": float(x["_盈亏额"]), "结果": str(x["结果"])}
+            for _, x in g.iterrows()]
+    return {"date": day, "time": tms[-1] if tms else "", "rows": rows,
+            "pnl": float(g["_盈亏额"].sum()),
+            "wins": int(sum(1 for x in rows if x["盈亏%"] > 0)),
+            "losses": int(sum(1 for x in rows if x["盈亏%"] < 0))}
+
+
 def _collect() -> dict:
     date_str = _today()
     idx_close, idx_ma60, cold = app.market_temperature_impl()
@@ -200,6 +223,7 @@ def _collect() -> dict:
         "exp_pnl": 0.0,       # 按胜率加权的预期盈亏
         "max_drawdown": 0.0,  # 组合内最大回撤（最差那只）
         "review": None,       # 复盘摘要
+        "last": None,         # 上一次推送的逐只表现（赚了多少/亏了多少）
         "note": "",           # 提前结束的单一提示（空仓等）
     }
 
@@ -233,7 +257,9 @@ def _collect() -> dict:
 
     # —— 复盘摘要：直接附在邮件里，连网页都不用点开 ——
     try:
-        d["review"] = build_review(app.review_impl())   # 复用 app 复盘逻辑（只读历史推荐，不影响选股）
+        _rv = app.review_impl()
+        d["review"] = build_review(_rv)                 # 复用 app 复盘逻辑（只读历史推荐，不影响选股）
+        d["last"] = build_last_batch(_rv)               # 上一次推送现在赚了还是亏了
     except Exception as e:                              # 复盘失败绝不影响正常推荐和发邮件
         print("复盘摘要生成失败(不影响推荐):", e)
 
@@ -298,6 +324,16 @@ def _render_text(d: dict) -> str:
         f"组合预期：按胜率加权 {d['exp_pnl']:+.0f} 元 | "
         f"全部止盈最好 {d['exp_win']:+.0f} 元 | 全部止损最坏 {d['exp_loss']:+.0f} 元"
     )
+
+    # —— 上一次推送表现：赚了还是亏了、赚亏多少 ——
+    lb = d.get("last")
+    if lb:
+        _when = f"{lb['date']} {lb['time']}" if lb["time"] else lb["date"]
+        lines += ["", f"【上一次推送 {_when} · {len(lb['rows'])} 只】现在怎么样："]
+        for x in lb["rows"]:
+            lines.append(f"  {x['名称']} 推荐 {x['推荐价']:.2f} → 现价 {x['现价']:.2f}  "
+                         f"{x['盈亏%']:+.1f}%（{x['盈亏额']:+.0f} 元）  {x['结果']}")
+        lines.append(f"  合计 {lb['pnl']:+.0f} 元（盈利 {lb['wins']} 只 / 亏损 {lb['losses']} 只）")
 
     r = d["review"]
     if r:
@@ -452,6 +488,34 @@ def _render_html(d: dict) -> str:
                      f"回测：收益 {p['回测收益']:+.1f}% · 胜率 {p['回测胜率']:.0f}% · "
                      f"最大回撤 {p['最大回撤']:.1f}% · 交易 {p['交易次数']} 次</div>")
         h.append("</div>")
+
+    # —— 上一次推送表现（赚了还是亏了） ——
+    lb = d.get("last")
+    if lb:
+        _when = f"{lb['date']} {lb['time']}" if lb["time"] else lb["date"]
+        _pc = "#d93025" if lb["pnl"] >= 0 else "#1a7f37"        # A股：红涨绿跌
+        h.append("<div style=\"border:1px solid #e6e9ee;border-radius:12px;padding:14px 16px;"
+                 "margin-bottom:14px;\">")
+        h.append(f"<div style=\"font-size:13.5px;font-weight:700;color:#1f2328;margin-bottom:4px;\">"
+                 f"📌 上一次推送表现 · {_when}（{len(lb['rows'])} 只）</div>")
+        h.append(f"<div style=\"font-size:12px;color:#8b949e;margin-bottom:10px;\">合计 "
+                 f"<b style=\"color:{_pc};font-size:14px;\">{lb['pnl']:+.0f} 元</b>"
+                 f"　盈利 {lb['wins']} 只 / 亏损 {lb['losses']} 只</div>")
+        h.append("<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" "
+                 "style=\"font-size:12.5px;color:#57606a;border-collapse:collapse;\">")
+        h.append("<tr style=\"color:#9aa4b1;font-size:11.5px;\">"
+                 "<td style=\"padding:6px 0;border-bottom:1px solid #eef1f4;\">名称</td>"
+                 "<td align=\"right\" style=\"border-bottom:1px solid #eef1f4;\">推荐价→现价</td>"
+                 "<td align=\"right\" style=\"border-bottom:1px solid #eef1f4;\">盈亏</td></tr>")
+        for x in lb["rows"]:
+            c = "#d93025" if x["盈亏%"] >= 0 else "#1a7f37"
+            h.append(f"<tr><td style=\"padding:7px 0;border-bottom:1px solid #f4f6f9;\">{x['名称']}</td>"
+                     f"<td align=\"right\" style=\"border-bottom:1px solid #f4f6f9;\">"
+                     f"{x['推荐价']:.2f}→{x['现价']:.2f}</td>"
+                     f"<td align=\"right\" style=\"border-bottom:1px solid #f4f6f9;color:{c};\">"
+                     f"{x['盈亏%']:+.1f}%<br><span style=\"font-size:11px;\">"
+                     f"{x['盈亏额']:+.0f} 元</span></td></tr>")
+        h.append("</table></div>")
 
     # —— 复盘 ——
     r = d["review"]
