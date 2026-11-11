@@ -21,6 +21,24 @@ def _today() -> str:
             + _datetime.timedelta(hours=8)).strftime("%Y-%m-%d")
 
 
+def _now_hm() -> str:
+    """北京时间的时分。同一天可能推送多次（手动重发/冗余触发），web 复盘靠它分批显示。"""
+    return (_datetime.datetime.now(_datetime.timezone.utc)
+            + _datetime.timedelta(hours=8)).strftime("%H:%M")
+
+
+def _append_log(rec: pd.DataFrame) -> None:
+    """追加推送记录。列结构可能变化（新增「推送时间」），整表重写避免追加时列错位。"""
+    old = None
+    if LOG_FILE.exists():
+        try:
+            old = pd.read_csv(LOG_FILE, dtype={"代码": str})
+        except Exception:
+            old = None
+    out = pd.concat([old, rec], ignore_index=True) if old is not None else rec
+    out.to_csv(LOG_FILE, index=False, encoding="utf-8-sig")
+
+
 def _already_sent_today() -> bool:
     """当天是否已经推送过（冗余 cron 只发一次用）"""
     try:
@@ -63,7 +81,7 @@ LOG_FILE = Path(__file__).parent / "推送记录.csv"       # 推送留档，供
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.13"
+APP_VERSION = "v1.14"
 
 
 def _mark_sent_today() -> None:
@@ -219,12 +237,12 @@ def _collect() -> dict:
     except Exception as e:                              # 复盘失败绝不影响正常推荐和发邮件
         print("复盘摘要生成失败(不影响推荐):", e)
 
-    # 留档供周末复盘
+    # 留档供周末复盘（带上推送时间，同一天多次推送才能在 web 里分开显示）
     rec = plan[["代码", "名称", "现价", "买入股数"]].copy()
     rec.insert(0, "日期", date_str)
+    rec.insert(1, "推送时间", _now_hm())
     rec["大盘标签"] = d["tag"]
-    rec.to_csv(LOG_FILE, mode="a", header=not LOG_FILE.exists(),
-               index=False, encoding="utf-8-sig")
+    _append_log(rec)
     return d
 
 

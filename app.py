@@ -174,10 +174,9 @@ def send_email_with_results(plan, mined, capital, leftover, cold, idx_close, idx
         try:
             rec = plan[["代码", "名称", "现价", "买入股数"]].copy()
             rec.insert(0, "日期", d["date"])
+            rec.insert(1, "推送时间", daily_push._now_hm())   # 同一天多次推送靠它分批
             rec["大盘标签"] = d["tag"]
-            log_file = Path(__file__).parent / "推送记录.csv"
-            rec.to_csv(log_file, mode="a", header=not log_file.exists(),
-                       index=False, encoding="utf-8-sig")
+            daily_push._append_log(rec)                       # 统一整表重写，避免追加时列错位
         except Exception:
             pass
         daily_push.send(daily_push._render_text(d), daily_push._render_html(d))
@@ -427,6 +426,9 @@ def review_impl() -> pd.DataFrame:
     if df is None or len(df) == 0:
         return pd.DataFrame()
     df = df.dropna(subset=["日期", "代码", "现价"]).tail(REVIEW_N)
+    # 同一天可能推送多次（手动重发/冗余触发），用「推送时间」区分批次；旧记录没有该列则留空
+    if "推送时间" not in df.columns:
+        df["推送时间"] = ""
     end_d = dt.date.today()
     idx_s = _index_series(pd.Timestamp(str(df["日期"].min())), end_d)   # 基准指数，只拉一次
     rows = []
@@ -482,7 +484,9 @@ def review_impl() -> pd.DataFrame:
                 bench = round((b1 / b0 - 1) * 100, 2)
             except Exception:
                 bench = None
-        row = {"日期": rec_date.strftime("%Y-%m-%d"), "名称": str(r.get("名称", "")).strip(),
+        row = {"日期": rec_date.strftime("%Y-%m-%d"),
+               "推送时间": ("" if pd.isna(r.get("推送时间")) else str(r.get("推送时间")).strip()),
+               "名称": str(r.get("名称", "")).strip(),
                "推荐价": round(price0, 2), "现价": round(judge_px, 2),
                "盈亏%": round((judge_px / price0 - 1) * 100, 2), "结果": label,
                "同期沪深300%": bench,
@@ -495,8 +499,10 @@ def review_impl() -> pd.DataFrame:
         rows.append(row)
     if not rows:
         return pd.DataFrame()
-    return (pd.DataFrame(rows)
-            .sort_values("日期", ascending=False).reset_index(drop=True))
+    out = pd.DataFrame(rows)
+    out["_batch"] = out["日期"] + " " + out["推送时间"]      # 批次键：日期+推送时间
+    # 最新批次在前：先按日期倒序，同一天再按推送时间倒序（旧记录无时间，排最后）
+    return out.sort_values(["日期", "推送时间"], ascending=[False, False]).reset_index(drop=True)
 
 
 # 缓存包装：web UI 一律调 review_performance；ttl=6小时，同一天内重复打开秒开
@@ -531,7 +537,7 @@ def review_conclusion(rv: pd.DataFrame) -> str:
         text += f" 止损纪律避免了约 {saved:.0f} 元额外亏损。"
     return text
 
-APP_VERSION = "v1.13"       # v1.13 历史复盘按推送日分批显示，批次之间用红色横线隔开
+APP_VERSION = "v1.14"       # v1.14 复盘按推送批次（日期+时间）分批显示，同一天多次推送也用红线隔开
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 st.title("📈 每日选股")
@@ -937,12 +943,15 @@ with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}条，自动更新�
         _cols = ["名称", "推荐价", "现价", "盈亏%", "同期沪深300%", "结果"]
         _cfg = {"盈亏%": st.column_config.NumberColumn(format="%+.2f%%"),
                 "同期沪深300%": st.column_config.NumberColumn(format="%+.2f%%")}
-        # 按推送日分批显示，不同批次之间用红色横线隔开，避免几天的推荐混在一张表里分不清
-        for i, (rec_day, g) in enumerate(rv.groupby("日期", sort=False)):
+        # 按推送批次（日期+时间）分组显示，批次之间用红色横线隔开：
+        # 既区分不同日期，也区分同一天里第几次推送
+        for i, (_, g) in enumerate(rv.groupby("_batch", sort=False)):
             if i:
                 st.markdown("<hr style='border:none;border-top:2px solid #ff4b4b;margin:12px 0'>",
                             unsafe_allow_html=True)
-            st.markdown(f"**📅 {rec_day} 推送 · {len(g)} 只**")
+            _day, _tm = g["日期"].iloc[0], g["推送时间"].iloc[0]
+            _when = f"{_day} {_tm}" if _tm else _day
+            st.markdown(f"**📅 {_when} 推送 · {len(g)} 只**")
             st.dataframe(g[_cols], width="stretch", hide_index=True, column_config=_cfg)
         st.info("💡 " + review_conclusion(rv))
         if len(done) < 30:
