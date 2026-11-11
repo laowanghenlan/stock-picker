@@ -121,16 +121,29 @@ def send_email_with_results(plan, mined, capital, leftover, cold, idx_close, idx
             "plan": [{
                 "名称": p["名称"], "代码": p["代码"], "现价": float(p["现价"]),
                 "股数": int(p["买入股数"]), "投入": float(p["投入(含佣金)"]),
+                "仓位占比": float(p["投入(含佣金)"]) / float(capital) * 100 if float(capital) else 0.0,
                 "盈利概率": float(p["盈利概率"]),
                 "止损": float(p["止损价(买入价×0.95)"]),
                 "止盈": float(p["止盈参考(买入价×1.10)"]),
+                "预计盈利": float(p["预计盈利(元)"]),
+                "预计亏损": float(p["预计亏损(元)"]),
+                "盈亏比": (float(p["预计盈利(元)"]) / abs(float(p["预计亏损(元)"]))
+                           if float(p["预计亏损(元)"]) else 0.0),
             } for _, p in plan.iterrows()],
             "n_picks": len(plan),
             "invest": float(plan["投入(含佣金)"].sum()),
             "left": float(leftover),
+            "exp_win": 0.0, "exp_loss": 0.0, "exp_pnl": 0.0, "max_drawdown": 0.0,
             "review": None,
             "note": "",
         }
+        # 组合层：按胜率加权的预期收益 / 全止盈最好 / 全止损最坏（与定时邮件同口径）
+        pts = d["plan"]
+        if pts:
+            d["exp_win"] = sum(x["预计盈利"] for x in pts)
+            d["exp_loss"] = sum(x["预计亏损"] for x in pts)
+            d["exp_pnl"] = sum(x["盈利概率"] / 100 * x["预计盈利"]
+                               + (1 - x["盈利概率"] / 100) * x["预计亏损"] for x in pts)
         # 复盘摘要：复用 app 的复盘逻辑，失败不影响发邮件
         try:
             rv = review_impl()
@@ -148,7 +161,9 @@ def send_email_with_results(plan, mined, capital, leftover, cold, idx_close, idx
                             r["excess"] = float((d2["盈亏%"] - d2["同期沪深300%"]).mean())
                     for _, r2 in rv.head(5).iterrows():
                         r["rows"].append({"日期": str(r2["日期"]), "名称": r2["名称"],
-                                          "结果": r2["结果"], "盈亏%": float(r2["盈亏%"])})
+                                          "推荐价": float(r2["推荐价"]), "现价": float(r2["现价"]),
+                                          "结果": r2["结果"], "盈亏%": float(r2["盈亏%"]),
+                                          "盈亏额": float(r2["_盈亏额"])})
                     r["conclusion"] = review_conclusion(rv)
                     d["review"] = r
         except Exception:
