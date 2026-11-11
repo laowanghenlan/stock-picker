@@ -531,7 +531,7 @@ def review_conclusion(rv: pd.DataFrame) -> str:
         text += f" 止损纪律避免了约 {saved:.0f} 元额外亏损。"
     return text
 
-APP_VERSION = "v1.11"       # v1.11 行情双源：东财限流时自动降级腾讯批量接口，100秒硬超时+10分钟冷却，修云端无限转圈
+APP_VERSION = "v1.12"       # v1.12 结果表新增"佣金"列 + 交易成本明细（买入佣金/卖出预计费用/占买入金额比例）
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 st.title("📈 每日选股")
@@ -900,6 +900,7 @@ def allocate(picks: pd.DataFrame, budget0: float,
         plan.append({
             "代码": r["代码"], "名称": r["名称"],
             "现价": price, "买入股数": shares,
+            "佣金(元)": round(fee, 2),
             "投入(含佣金)": invest,
             "盈利概率": round(r["胜率"], 0),
             "预计盈利(元)": est_win,
@@ -946,7 +947,8 @@ with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}条，自动更新�
                    "未满20日且未触发的标 ⏳持有中，不计入胜率。")
 
 # ---------------- 页面：一个按钮 + 一张结果表 ----------------
-st.caption(f"本金 {capital:.0f} 元 · 只数由本金+预期收益自动优化 · 股价上限 {MAX_PRICE:.1f} 元 · 已内置手续费/止损/回测验证")
+st.caption(f"本金 {capital:.0f} 元 · 只数由本金+预期收益自动优化 · 股价上限 {MAX_PRICE:.1f} 元 · "
+           "已内置手续费（佣金万2.5，单笔最低5元；印花税0.05%卖出收取；含过户费/滑点）")
 run = st.button("🔍 今日选股", type="primary", width='stretch')
 
 if run:
@@ -1065,10 +1067,20 @@ if run:
     m3.metric("至少一只盈利概率", f"{p_any * 100:.0f}%")
     m4.metric("剩余现金", f"{leftover:.0f} 元")
 
+    # ---- 交易成本明细：买入佣金 + 卖出预计费用（佣金/印花税/过户费） ----
+    _amt = float((plan["买入股数"] * plan["现价"]).sum())
+    _buy_fee = float((plan["投入(含佣金)"] - plan["买入股数"] * plan["现价"]).sum())
+    _sell_fee = float((5.0 + plan["买入股数"] * plan["现价"] * 0.00051).sum())   # 最低佣金5元+印花税0.05%+过户费
+    st.caption(f"💰 交易成本：买入佣金 **{_buy_fee:.2f} 元**（费率万2.5，单笔最低5元）· "
+               f"卖出预计 **{_sell_fee:.2f} 元**（佣金+印花税0.05%+过户费）· "
+               f"一买一卖合计 **{_buy_fee + _sell_fee:.2f} 元**，"
+               f"占买入金额 {(_buy_fee + _sell_fee) / _amt * 100:.2f}%（约等于股价要涨这么多才回本）")
+
     st.success(f"今日选出 {len(plan)} 只，方案如下：")
     show = plan.drop(columns=["_win_prob", "_est_win", "_est_loss"])
     st.dataframe(show, width="stretch", hide_index=True,
                  column_config={"盈利概率": st.column_config.NumberColumn(format="%.0f%%"),
+                                "佣金(元)": st.column_config.NumberColumn(format="%.2f"),
                                 "预计盈利(元)": st.column_config.NumberColumn(format="%+.1f"),
                                 "预计亏损(元)": st.column_config.NumberColumn(format="%.1f")})
     st.caption("预计盈利/亏损 = 投入 × 该股历史平均每笔盈利率/亏损率（已扣交易成本）；"
