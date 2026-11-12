@@ -84,7 +84,7 @@ LOG_FILE = Path(__file__).parent / "推送记录.csv"       # 推送留档，供
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.19"
+APP_VERSION = "v1.20"
 
 
 def _mark_sent_today() -> None:
@@ -227,6 +227,7 @@ def _collect() -> dict:
         "review": None,       # 复盘摘要
         "last": None,         # 上一次推送的逐只表现（赚了多少/亏了多少）
         "note": "",           # 提前结束的单一提示（空仓等）
+        "news_warn": "",      # 舆情接口降级警示（不阻断推荐，仅提示排雷可信度下降）
     }
 
     cand = app.screen_impl()                   # 初筛（内部经 get_spot_impl 拉全市场行情）
@@ -237,8 +238,15 @@ def _collect() -> dict:
     cand = cand.nlargest(app.CANDIDATES_PUSH, "成交额")   # 邮件端在后台跑，用更大的候选池
     res = app.verify_impl(cand, lambda p, t: None)        # 无界面，进度回调置空
     if len(res) == 0:
-        d["note"] = "候选股历史数据不足，今日不建议买入。"
+        _hf = res.attrs.get("hist_failed", [])
+        if _hf and len(_hf) >= len(cand):
+            d["note"] = "行情数据源暂时不可用（东财限流/新浪无有效返回），本次无法完成验证，不建议据此操作。"
+        else:
+            d["note"] = "候选股均未通过验证，今日不建议买入。"
         return d
+    _nf = res.attrs.get("news_failed", [])
+    if _nf:
+        d["news_warn"] = f"舆情接口异常，{len(_nf)} 只候选按无雷降级处理，排雷结果仅供参考。"
 
     mined = res[res["有雷"]]
     if len(mined) > 0:
@@ -323,6 +331,9 @@ def _render_text(d: dict) -> str:
         for m in d["mined"]:
             lines.append(f"  - {m['名称']}（{m['代码']}）：{m['标题']}")
         lines.append("")
+
+    if d.get("news_warn"):
+        lines += ["⚠️ " + d["news_warn"], ""]
 
     lines.append(f"今日推荐：本金 {d['capital']:.0f} 元，按本金+预期收益自动算出 {d['n_picks']} 只，"
                  f"计划投入 {d['invest']:.0f} 元，剩余 {d['left']:.0f} 元")
@@ -461,6 +472,12 @@ def _render_html(d: dict) -> str:
             h.append(f"<div style=\"font-size:13px;color:#5f6b7a;line-height:1.8;\">"
                      f"· {m['名称']}（{m['代码']}）{m['标题']}</div>")
         h.append("</div>")
+
+    # —— 舆情降级警示（不阻断推荐）——
+    if d.get("news_warn"):
+        h.append("<div style=\"background:#fff8e6;border:1px solid #f0e0b0;border-radius:12px;"
+                 "padding:12px 16px;margin-bottom:18px;font-size:13px;color:#8a5a00;line-height:1.7;\">"
+                 f"⚠ {d['news_warn']}</div>")
 
     # —— 概要统计 ——
     h.append("<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" "

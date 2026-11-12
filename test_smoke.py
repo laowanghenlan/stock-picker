@@ -58,14 +58,19 @@ if len(res) > 0:
     print("\n⑤ best_plan 只数优化 ...")
     plan, n = app.best_plan(ranked, 2200.0)
     print(f"  best_plan：最优 {n} 只")
-    assert len(plan) == n, f"只数不匹配 {len(plan)} vs {n}"
-    check("plan 投入含佣金", lambda: "投入(含佣金)" in plan.columns)
+    if len(ranked) == 0:
+        # 3只样本可能全部扣费亏损/有雷被过滤，空仓是合法结果，不是bug
+        assert plan is None and n == 0, f"空候选应返回(None,0)，实际 {type(plan)} / {n}"
+        print("  候选全部被过滤（扣费亏损或有雷），空仓结果合法，跳过 allocate")
+    else:
+        assert len(plan) == n, f"只数不匹配 {len(plan)} vs {n}"
+        check("plan 投入含佣金", lambda: "投入(含佣金)" in plan.columns)
 
-    # ---------- 6. allocate ----------
-    print("\n⑥ allocate 分配本金 ...")
-    p2, left = app.allocate(ranked.head(3), 2200.0)
-    print(f"  allocate：{len(p2)} 只，剩余 {left} 元")
-    check("allocate 有买入股数列", lambda: "买入股数" in p2.columns)
+        # ---------- 6. allocate ----------
+        print("\n⑥ allocate 分配本金 ...")
+        p2, left = app.allocate(ranked.head(3), 2200.0)
+        print(f"  allocate：{len(p2)} 只，剩余 {left} 元")
+        check("allocate 有买入股数列", lambda: "买入股数" in p2.columns)
 
 # ---------- 7. 复盘 ----------
 print("\n⑦ 复盘 ...")

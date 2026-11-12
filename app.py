@@ -450,26 +450,35 @@ def _index_series(start: pd.Timestamp, end: dt.date):
     return None
 
 
-def _sina_history(code: str) -> pd.DataFrame:
-    """新浪日线兜底（不复权收盘，与推送时的现价同口径）。
-    东财被限流时 get_history_impl 会直接报错，复盘靠这条路径仍能算出盈亏。"""
+def _sina_history(code: str, datalen: int = 60, full: bool = False) -> pd.DataFrame:
+    """新浪日线兜底（不复权，与推送时的现价同口径）。
+    东财被限流时 get_history_impl 会直接报错，复盘靠这条路径仍能算出盈亏。
+    full=True 返回完整 OHLCV（选股回测/因子要用最高最低价）；默认只回日期+收盘。"""
     n = str(code).strip().zfill(6)[-6:]
     pfx = "sh" if n.startswith(("6", "9")) else "sz"
     u = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
-         f"CN_MarketData.getKLineData?symbol={pfx}{n}&scale=240&ma=no&datalen=60")
+         f"CN_MarketData.getKLineData?symbol={pfx}{n}&scale=240&ma=no&datalen={int(datalen)}")
     try:
         j = requests.get(u, timeout=10, headers={"User-Agent": "Mozilla/5.0"}).json()
-        return pd.DataFrame({"日期": pd.to_datetime([x["day"] for x in j]),
-                             "收盘": [float(x["close"]) for x in j]}
-                            ).sort_values("日期").reset_index(drop=True)
+        if not isinstance(j, list) or not j:
+            return pd.DataFrame()
+        data = {"日期": pd.to_datetime([x["day"] for x in j]),
+                "收盘": [float(x["close"]) for x in j]}
+        if full:
+            data.update({"开盘": [float(x["open"]) for x in j],
+                         "最高": [float(x["high"]) for x in j],
+                         "最低": [float(x["low"]) for x in j],
+                         "成交量": [float(x["volume"]) for x in j]})
+        return pd.DataFrame(data).sort_values("日期").reset_index(drop=True)
     except Exception:
         return pd.DataFrame()
 
 
-def _hist_any(code: str, start: str, end: str, try_em: bool = True) -> pd.DataFrame:
+def _hist_any(code: str, start: str, end: str, try_em: bool = True, full: bool = False) -> pd.DataFrame:
     """取历史日线：新浪优先（约0.5秒/只且不复权，与推送现价同口径），失败再试东财（5秒上限）。
-    东财单步必须短超时——否则外层超时会把整个函数（含兜底）一起掐断，兜底永远用不上。"""
-    h = _sina_history(code)
+    东财单步必须短超时——否则外层超时会把整个函数（含兜底）一起掐断，兜底永远用不上。
+    full=True 取完整 OHLCV（选股验证用，500根）；默认只取收盘（复盘用，60根）。"""
+    h = _sina_history(code, datalen=500 if full else 60, full=full)
     if h is not None and len(h) > 0:
         return h
     if try_em:
@@ -649,7 +658,7 @@ def review_conclusion(rv: pd.DataFrame) -> str:
         text += f" 止损纪律避免了约 {saved:.0f} 元额外亏损。"
     return text
 
-APP_VERSION = "v1.19"       # v1.19 MACD柱与KDJ_J接入多因子IC动态定权
+APP_VERSION = "v1.20"       # v1.20 选股取数新浪优先+东财兜底；舆情失败降级无雷；区分数据源故障与无合格候选
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 st.title("📈 每日选股")
@@ -765,6 +774,7 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
     end_d = dt.date.today()
     start_d = end_d - dt.timedelta(days=HISTORY_DAYS)
     rows, hists, meta = [], {}, {}          # hists/meta：供因子面板与行业中性化使用
+    hist_failed, news_failed = [], []       # 取数失败名单：区分"数据源不可用"与"候选不合格"
     fundamentals = {}                         # {代码: baostock财报DataFrame}，给基本面因子用
     total = len(cands)
     # ===== 逐票拉候选股基本面（Baostock 历史财报，免费，消除估值因子前视偏差）=====
@@ -786,7 +796,8 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
 
         def _fetch_one(cd):
             try:
-                h = get_history_impl(cd, start_d.strftime("%Y%m%d"), end_d.strftime("%Y%m%d"))
+                # 新浪优先、东财5秒兜底：东财限流时不再整批候选归零
+                h = _hist_any(cd, start_d.strftime("%Y%m%d"), end_d.strftime("%Y%m%d"), full=True)
             except Exception:
                 h = None
             try:
@@ -811,8 +822,9 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
             if code in hists_pre:                        # 并发预取结果（None 表示拉取失败）
                 h = hists_pre[code]
             else:                                        # 预取未覆盖（异常回落）才串行补拉
-                h = get_history_impl(code, start_d.strftime("%Y%m%d"), end_d.strftime("%Y%m%d"))
+                h = _hist_any(code, start_d.strftime("%Y%m%d"), end_d.strftime("%Y%m%d"), full=True)
             if h is None or len(h) < 120:
+                hist_failed.append(code)
                 continue
             pe, pb = _num(r.get("市盈率-动态")), _num(r.get("市净率"))
             if pe is not None and pe <= 0:
@@ -829,8 +841,9 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
             fee = float(bs["累计手续费"].rstrip("元"))
             avg_win, avg_loss = _trade_stats(sig)
             risk_hits = news_pre[code] if code in news_pre else news_risk_impl(code)  # 舆情排雷（优先用并发预取结果）
-            if risk_hits is None:
-                continue                            # 舆情拉取失败：保持原行为，跳过该票
+            if risk_hits is None:                   # 舆情接口失败：降级为"无雷"并记录，不再整票跳过
+                risk_hits = []
+                news_failed.append(code)
             last = sig.iloc[-1]
             # 技术面硬条件：当前价在20日线上，且5日线在20日线上（趋势仍向上）
             # _fast/_slow 是信号表里的 MA5/MA20 列
@@ -854,6 +867,9 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
             continue                                    # 单只失败不影响整体
         progress(0.65 + 0.35 * (i + 1) / total, f"回测验证中 {i + 1}/{total}：{r['名称']}")
     res = pd.DataFrame(rows)
+    res.attrs["hist_failed"] = hist_failed      # 行情取数失败的候选（数据源问题，非选股结论）
+    res.attrs["news_failed"] = news_failed      # 舆情取数失败、按"无雷"降级的候选
+    res.attrs["n_cands"] = total
     # 因子IC检验：行业中性化 → 逐交易日横截面IC → 最近20日均值定权
     try:
         npanel = factors.neutralize(factors.build_panel(hists, meta, fundamentals=fundamentals))
@@ -1171,8 +1187,17 @@ if run:
     bar.empty()
 
     if len(res) == 0:
-        st.warning("候选股历史数据不足，无法验证，今天不建议买入。")
+        _hf = res.attrs.get("hist_failed", [])
+        if _hf and len(_hf) >= len(cands):
+            st.warning("行情数据源暂时不可用（东财限流、新浪未返回有效数据），本次无法完成验证。"
+                       "这不是选股结论，请稍后重试，不建议据此操作。")
+        else:
+            st.warning("候选股均未通过验证（历史不足/回测不合格），今天不建议买入。")
         st.stop()
+    _nf = res.attrs.get("news_failed", [])
+    if _nf:
+        st.caption(f"⚠️ 舆情接口异常，{len(_nf)} 只候选按“无雷”降级处理，排雷结果仅供参考："
+                   f"{', '.join(_nf[:10])}{' 等' if len(_nf) > 10 else ''}")
     # 舆情排雷通报：哪些因近7天利空新闻被排除
     mined = res[res["有雷"]]
     if len(mined) > 0:
