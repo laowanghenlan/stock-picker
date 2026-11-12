@@ -446,6 +446,30 @@ def _index_series(start: pd.Timestamp, end: dt.date):
         return None
 
 
+def _sina_history(code: str) -> pd.DataFrame:
+    """新浪日线兜底（不复权收盘，与推送时的现价同口径）。
+    东财被限流时 get_history_impl 会直接报错，复盘靠这条路径仍能算出盈亏。"""
+    n = str(code).strip().zfill(6)[-6:]
+    pfx = "sh" if n.startswith(("6", "9")) else "sz"
+    u = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+         f"CN_MarketData.getKLineData?symbol={pfx}{n}&scale=240&ma=no&datalen=60")
+    try:
+        j = requests.get(u, timeout=10, headers={"User-Agent": "Mozilla/5.0"}).json()
+        return pd.DataFrame({"日期": pd.to_datetime([x["day"] for x in j]),
+                             "收盘": [float(x["close"]) for x in j]}
+                            ).sort_values("日期").reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _hist_any(code: str, start: str, end: str) -> pd.DataFrame:
+    """取历史日线：优先东财（前复权），失败/为空时降级新浪（不复权）"""
+    h = get_history_impl(code, start, end)
+    if h is None or len(h) == 0:
+        return _sina_history(code)
+    return h
+
+
 def review_impl() -> pd.DataFrame:
     """复盘最近 REVIEW_N 个推送批次（同一天多次推送按「推送时间」分批，整批保留）：
     推荐日后最长跟踪 REVIEW_DAYS 个交易日（与策略持有期一致），逐日判定谁先触发
@@ -490,8 +514,8 @@ def review_impl() -> pd.DataFrame:
             continue
     if _jobs:
         _ex = _cf.ThreadPoolExecutor(max_workers=6)
-        _futs = {_ex.submit(_run_with_timeout, get_history_impl, cd,
-                            rd.strftime("%Y%m%d"), end_d.strftime("%Y%m%d"), timeout=8): (cd, rd)
+        _futs = {_ex.submit(_run_with_timeout, _hist_any, cd,
+                            rd.strftime("%Y%m%d"), end_d.strftime("%Y%m%d"), timeout=15): (cd, rd)
                  for cd, rd in _jobs}
         for _f in _cf.as_completed(_futs):
             _cd, _rd = _futs[_f]
@@ -611,7 +635,7 @@ def review_conclusion(rv: pd.DataFrame) -> str:
         text += f" 止损纪律避免了约 {saved:.0f} 元额外亏损。"
     return text
 
-APP_VERSION = "v1.18.3"     # v1.18.3 大盘温度增加超时降级，避免云端启动白屏
+APP_VERSION = "v1.18.4"     # v1.18.4 复盘增加新浪行情兜底，东财限流时不再全显示"当日新推"
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 st.title("📈 每日选股")
