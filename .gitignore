@@ -2,6 +2,8 @@
 spot_cache.csv
 spot_cache_*.csv
 industry_cache.csv
+# 巨潮代码→orgId映射缓存（按mtime判30天新鲜度，checkout会刷新mtime，不入库）
+cninfo_stock.csv
 持仓.csv
 __pycache__/
 *.pyc

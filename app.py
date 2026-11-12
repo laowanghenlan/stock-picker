@@ -10,6 +10,7 @@ import datetime as dt
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 # Streamlit 以 __main__ 运行本脚本：把 "app" 别名指向本模块自身，
@@ -24,7 +25,7 @@ import streamlit as st
 
 from data import (get_history, get_history_impl, get_spot, get_spot_impl,
                   industry_map_impl, refresh_spot, spot_cache_time, spot_fresh_enough,
-                  spot_recently_failed)
+                  spot_recently_failed, get_history_tx, cninfo_risk_impl, tushare_daily_basic)
 from strategy import (at_limit_down, at_limit_up, backtest, calibrate_win_rate,
                       generate_signals)
 
@@ -474,18 +475,49 @@ def _sina_history(code: str, datalen: int = 60, full: bool = False) -> pd.DataFr
         return pd.DataFrame()
 
 
+_EM_HIST_FAIL_AT = 0.0     # 东财历史接口失败时刻：30分钟内直接跳过，避免每只票白等5秒
+
+
+def _em_hist_down() -> bool:
+    return _EM_HIST_FAIL_AT > 0 and (time.time() - _EM_HIST_FAIL_AT) < 1800
+
+
 def _hist_any(code: str, start: str, end: str, try_em: bool = True, full: bool = False) -> pd.DataFrame:
-    """取历史日线：新浪优先（约0.5秒/只且不复权，与推送现价同口径），失败再试东财（5秒上限）。
-    东财单步必须短超时——否则外层超时会把整个函数（含兜底）一起掐断，兜底永远用不上。
-    full=True 取完整 OHLCV（选股验证用，500根）；默认只取收盘（复盘用，60根）。"""
-    h = _sina_history(code, datalen=500 if full else 60, full=full)
-    if h is not None and len(h) > 0:
-        return h
-    if try_em:
-        h = _run_with_timeout(get_history_impl, code, start, end, timeout=5)
-        if h is not None and len(h) > 0:
+    """取历史日线，按用途分两条降级链：
+    full=True（选股回测，要前复权+OHLCV）：东财(5秒) → 腾讯qfq → 新浪不复权。
+    full=False（复盘，要不复权现价口径）：新浪 → 东财(5秒) → 腾讯不复权。
+    东财单步必须短超时——否则外层超时会把整个函数（含兜底）一起掐断，兜底永远用不上。"""
+    global _EM_HIST_FAIL_AT
+
+    def _em():
+        global _EM_HIST_FAIL_AT
+        if not try_em or _em_hist_down():
+            return pd.DataFrame()
+        try:
+            h = _run_with_timeout(get_history_impl, code, start, end, timeout=5)
+            if h is not None and len(h) > 0:
+                return h
+        except Exception:
+            pass
+        _EM_HIST_FAIL_AT = time.time()      # 熔断30分钟，后续候选直接走腾讯/新浪
+        return pd.DataFrame()
+
+    if full:
+        h = _em()
+        if len(h) > 0:
             return h
-    return pd.DataFrame()
+        h = get_history_tx(code, start, end, full=True, fq="qfq")
+        if len(h) > 0:
+            return h
+        return _sina_history(code, datalen=500, full=True)
+
+    h = _sina_history(code)
+    if len(h) > 0:
+        return h
+    h = _em()
+    if len(h) > 0:
+        return h
+    return get_history_tx(code, start, end, full=False, fq="")
 
 
 def review_impl(_key: str = "") -> pd.DataFrame:
@@ -658,7 +690,7 @@ def review_conclusion(rv: pd.DataFrame) -> str:
         text += f" 止损纪律避免了约 {saved:.0f} 元额外亏损。"
     return text
 
-APP_VERSION = "v1.20"       # v1.20 选股取数新浪优先+东财兜底；舆情失败降级无雷；区分数据源故障与无合格候选
+APP_VERSION = "v1.21"       # v1.21 腾讯前复权日K兜底+东财熔断；巨潮公告排雷；Tushare Pro可选增强
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 st.title("📈 每日选股")
@@ -766,6 +798,35 @@ def _num(v):
         return None
 
 
+def news_and_announcements(code: str) -> list | None:
+    """舆情排雷 = 东财新闻 + 巨潮公告（法定信披，立案/处罚/减持更权威）。
+    两个源都失败才返回 None（上层按"无雷"降级并标注）；任一可用即返回合并去重结果。"""
+    try:
+        n = news_risk_impl(code)
+    except Exception:
+        n = None
+    try:
+        a = cninfo_risk_impl(code, days=7)
+    except Exception:
+        a = None
+    if n is None and a is None:
+        return None
+    out, seen = [], set()
+    for hit in (n or []) + (a or []):
+        t = str(hit.get("标题", ""))
+        if t and t not in seen:
+            seen.add(t)
+            out.append(hit)
+    return out
+
+
+def _fetch_one_news(cd):
+    try:
+        return news_and_announcements(cd)
+    except Exception:
+        return None
+
+
 def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
     """第二步：对初筛候选逐只跑 MA5/20 金叉策略回测。
     回测已含：佣金万2.5(最低5元)+印花税+滑点、冷却期20天、最短持有5天。
@@ -777,6 +838,21 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
     hist_failed, news_failed = [], []       # 取数失败名单：区分"数据源不可用"与"候选不合格"
     fundamentals = {}                         # {代码: baostock财报DataFrame}，给基本面因子用
     total = len(cands)
+    # ===== Tushare Pro 可选增强：配置了 TUSHARE_TOKEN 才启用，补齐快照缺失的 PE/PB/换手率 =====
+    try:
+        ts_basic = tushare_daily_basic()
+        if ts_basic is not None and len(cands):
+            cands = cands.copy()
+            cands["代码"] = cands["代码"].astype(str).str.zfill(6)
+            cands = cands.merge(ts_basic, on="代码", how="left")
+            for dst, src in (("市盈率-动态", "市盈率TTM_ts"), ("市净率", "市净率_ts"),
+                             ("换手率", "换手率_ts")):
+                if dst not in cands.columns:
+                    cands[dst] = cands[src]
+                else:
+                    cands[dst] = pd.to_numeric(cands[dst], errors="coerce").fillna(cands[src])
+    except Exception:
+        pass                                    # 增强失败不影响原有快照字段
     # ===== 逐票拉候选股基本面（Baostock 历史财报，免费，消除估值因子前视偏差）=====
     try:
         import fundamental as fd
@@ -796,14 +872,11 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
 
         def _fetch_one(cd):
             try:
-                # 新浪优先、东财5秒兜底：东财限流时不再整批候选归零
+                # 东财(熔断)→腾讯qfq→新浪：东财限流时不再整批候选归零
                 h = _hist_any(cd, start_d.strftime("%Y%m%d"), end_d.strftime("%Y%m%d"), full=True)
             except Exception:
                 h = None
-            try:
-                n = news_risk_impl(cd)
-            except Exception:
-                n = None
+            n = _fetch_one_news(cd)
             return cd, h, n
 
         with ThreadPoolExecutor(max_workers=8) as pool:
@@ -840,7 +913,7 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
             _, _, bs = backtest(sig, initial_cash=float(capital))
             fee = float(bs["累计手续费"].rstrip("元"))
             avg_win, avg_loss = _trade_stats(sig)
-            risk_hits = news_pre[code] if code in news_pre else news_risk_impl(code)  # 舆情排雷（优先用并发预取结果）
+            risk_hits = news_pre[code] if code in news_pre else _fetch_one_news(code)  # 新闻+巨潮公告（优先用并发预取结果）
             if risk_hits is None:                   # 舆情接口失败：降级为"无雷"并记录，不再整票跳过
                 risk_hits = []
                 news_failed.append(code)

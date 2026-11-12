@@ -223,6 +223,131 @@ def get_history_impl(symbol: str, start: str, end: str) -> pd.DataFrame:
 get_history = st.cache_data(ttl=3600, show_spinner="正在下载历史K线数据...")(get_history_impl)
 
 
+def get_history_tx(symbol: str, start: str, end: str,
+                   full: bool = True, fq: str = "qfq") -> pd.DataFrame:
+    """腾讯日K兜底：支持前复权(qfq)/不复权(fq="")，实测单次可返 600+ 根。
+    行格式 [日期, 开, 收, 高, 低, 成交量(手)]；full=False 只回日期+收盘（复盘用）。
+    失败返回空 DataFrame，由上层决定继续降级。"""
+    symbol = re.sub(r"\D", "", str(symbol))[-6:]
+    if not symbol:
+        return pd.DataFrame()
+    pfx = "sh" if symbol.startswith(("6", "9")) else "sz"
+    sd = f"{start[:4]}-{start[4:6]}-{start[6:8]}" if len(start) == 8 else start
+    ed = f"{end[:4]}-{end[4:6]}-{end[6:8]}" if len(end) == 8 else end
+    u = (f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
+         f"param={pfx}{symbol},day,{sd},{ed},800,{fq}")
+    try:
+        j = requests.get(u, timeout=12,
+                         headers={"User-Agent": "Mozilla/5.0",
+                                  "Referer": "https://gu.qq.com/"}).json()
+        d = j.get("data", {}).get(pfx + symbol, {})
+        k = d.get("qfqday") or d.get("day") or []
+        if not k:
+            return pd.DataFrame()
+        data = {"日期": pd.to_datetime([r[0] for r in k]),
+                "收盘": [float(r[2]) for r in k]}
+        if full:
+            data.update({"开盘": [float(r[1]) for r in k],
+                         "最高": [float(r[3]) for r in k],
+                         "最低": [float(r[4]) for r in k],
+                         "成交量": [float(r[5]) for r in k]})
+        return pd.DataFrame(data).sort_values("日期").reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame()
+
+
+# ---------------- 巨潮资讯（法定信披）公告排雷 ----------------
+_CNINFO_FILE = Path(__file__).parent / "cninfo_stock.csv"   # 代码→orgId 映射缓存
+_CNINFO_TTL_DAYS = 30
+_CNINFO_KW = ("立案", "处罚", "警示函", "监管函", "问询函", "违规", "退市",
+              "减持", "诉讼", "仲裁", "冻结", "停牌", "风险提示")
+
+
+def _cninfo_org_map() -> dict:
+    """代码→巨潮 orgId 映射。官网 stockList 一次给全市场（约6000只），缓存30天。"""
+    if _CNINFO_FILE.exists():
+        try:
+            if time.time() - _CNINFO_FILE.stat().st_mtime < _CNINFO_TTL_DAYS * 86400:
+                df = pd.read_csv(_CNINFO_FILE, dtype={"代码": str})
+                return dict(zip(df["代码"].str.zfill(6), df["orgId"].astype(str)))
+        except Exception:
+            pass
+    try:
+        r = requests.get("https://www.cninfo.com.cn/new/data/szse_stock.json",
+                         headers={"User-Agent": "Mozilla/5.0",
+                                  "Referer": "https://www.cninfo.com.cn/"}, timeout=20)
+        lst = r.json().get("stockList") or []
+        m = {str(x["code"]).zfill(6): str(x["orgId"]) for x in lst}
+        if m:
+            pd.DataFrame({"代码": list(m), "orgId": list(m.values())}).to_csv(
+                _CNINFO_FILE, index=False, encoding="utf-8-sig")
+        return m
+    except Exception:
+        return {}
+
+
+def cninfo_risk_impl(code: str, days: int = 7) -> list | None:
+    """巨潮公告排雷：法定信披里的立案/处罚/减持/诉讼等，比新闻更硬。
+    返回 [{"标题", "日期", "来源"}]；接口失败返回 None（上层降级处理，不当作无雷）。"""
+    code = re.sub(r"\D", "", str(code))[-6:]
+    org = _cninfo_org_map().get(code)
+    if not org:
+        return []                       # 非A股或映射缺失：无公告可查，不视为接口失败
+    end = dt.date.today()
+    start = end - dt.timedelta(days=days)
+    payload = {"pageNum": 1, "pageSize": 50, "column": "szse", "tabName": "fulltext",
+               "stock": f"{code},{org}", "seDate": f"{start}~{end}", "isHLtitle": "true"}
+    try:
+        r = requests.post("https://www.cninfo.com.cn/new/hisAnnouncement/query",
+                          data=payload, timeout=12,
+                          headers={"User-Agent": "Mozilla/5.0",
+                                   "Referer": "https://www.cninfo.com.cn/"})
+        out = []
+        for a in (r.json().get("announcements") or []):
+            title = str(a.get("announcementTitle", ""))
+            if any(k in title for k in _CNINFO_KW):
+                ts = a.get("announcementTime")
+                day = dt.datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d") if ts else ""
+                out.append({"标题": title, "日期": day, "来源": "巨潮公告"})
+        return out
+    except Exception:
+        return None
+
+
+# ---------------- Tushare Pro 可选增强（需自行配置 token） ----------------
+def tushare_enabled() -> bool:
+    """是否配置了 TUSHARE_TOKEN。未配置时所有增强自动关闭，不影响现有流程。"""
+    import os
+    return bool(os.environ.get("TUSHARE_TOKEN", "").strip())
+
+
+def tushare_daily_basic(trade_date: str | None = None) -> pd.DataFrame | None:
+    """Tushare daily_basic：PE(TTM)/PB/换手率/流通市值/总市值，一次拿全市场。
+    用于东财快照缺字段时补齐估值。未配置 token 或调用失败返回 None。"""
+    if not tushare_enabled():
+        return None
+    try:
+        import os
+        import tushare as ts
+        pro = ts.pro_api(os.environ["TUSHARE_TOKEN"].strip())
+        if not trade_date:
+            trade_date = dt.date.today().strftime("%Y%m%d")
+        df = pro.daily_basic(trade_date=trade_date,
+                             fields="ts_code,trade_date,pe_ttm,pb,turnover_rate,circ_mv,total_mv")
+        if df is None or len(df) == 0:
+            return None
+        return pd.DataFrame({
+            "代码": df["ts_code"].str[:6],
+            "市盈率TTM_ts": pd.to_numeric(df["pe_ttm"], errors="coerce"),
+            "市净率_ts": pd.to_numeric(df["pb"], errors="coerce"),
+            "换手率_ts": pd.to_numeric(df["turnover_rate"], errors="coerce"),
+            "流通市值_ts": pd.to_numeric(df["circ_mv"], errors="coerce") * 1e4,   # 万元→元
+            "总市值_ts": pd.to_numeric(df["total_mv"], errors="coerce") * 1e4,
+        })
+    except Exception:
+        return None
+
+
 _IND_FILE = Path(__file__).parent / "industry_cache.csv"
 _IND_TTL_DAYS = 30          # 行业归属很少变，缓存30天
 
