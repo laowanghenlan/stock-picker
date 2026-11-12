@@ -1,4 +1,4 @@
-"""L1 多因子层 v3：动量/5日反转/波动率/换手率及其变化/估值(EP、BP)/财务质量 + 行业中性化 + 相关性去冗余 + 20日IC均值配权。
+"""L1 多因子层 v3：动量/5日反转/波动率/换手率及其变化/MACD/KDJ/估值(EP、BP)/财务质量 + 行业中性化 + 相关性去冗余 + 20日IC均值配权。
 
 流程（全部离线可复现）：
 1. 每只候选股按日线向量化算出因子时间序列（不逐点重算，速度快）
@@ -17,6 +17,8 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
+from indicators import add_kdj, add_macd
+
 # ========== 自动进化配置（每天 evolution.py 可能改这个文件） ==========
 _CFG_PATH = Path(__file__).parent / "strategy_config.json"
 def _cfg() -> dict:
@@ -29,7 +31,7 @@ def _cfg() -> dict:
 
 import json  # noqa: E402
 
-FACTOR_COLS = ["动量20", "反转5", "波动率20", "换手20", "换手变化", "EP", "BP"]
+FACTOR_COLS = ["动量20", "反转5", "波动率20", "换手20", "换手变化", "MACD柱", "KDJ_J", "EP", "BP"]
 # 基本面因子（需要 Baostock 历史财报数据，避免前视偏差）
 # IC 检验自动决定要不要进评分；Baostock 挂了自动降级（留 NaN，因子跳过）
 FUND_FACTORS = ["ROE", "净利润增速", "营收增速", "净利率", "现金流质量"]
@@ -50,6 +52,12 @@ def factor_series(h: pd.DataFrame, pe: float = None, pb: float = None,
     """把一只股票的日线转成因子时间序列（向量化，含未来5日收益标签）。
     fundamental: baostock 财报 DataFrame（列：pubDate, ROE, 净利润增速, 营收增速, 净利率, 现金流质量）
                  按 pubDate 向后填充——因子只用发布日之后的基本面数据，消除前视偏差。"""
+    h = h.sort_values("日期").reset_index(drop=True).copy()
+    h = add_macd(h)
+    if {"最高", "最低"}.issubset(h.columns):
+        h = add_kdj(h)
+    else:
+        h["J"] = np.nan
     close = h["收盘"]
     out = pd.DataFrame({"日期": pd.to_datetime(h["日期"])})
     out["动量20"] = close / close.shift(20) - 1
@@ -63,6 +71,9 @@ def factor_series(h: pd.DataFrame, pe: float = None, pb: float = None,
         out["换手变化"] = turn.rolling(5).mean() / (turn.rolling(20).mean() + 1e-12) - 1
     else:
         out["换手变化"] = np.nan
+    # MACD柱除以价格消除量纲；KDJ_J保留原始J值，方向均由样本外IC决定
+    out["MACD柱"] = (h["MACD"] / close.replace(0, np.nan) * 100).replace([np.inf, -np.inf], np.nan)
+    out["KDJ_J"] = h["J"].replace([np.inf, -np.inf], np.nan)
     # 估值因子用倒数：越大=越便宜，方向与IC符号一致
     out["EP"] = 1.0 / pe if (pe and pe > 0) else np.nan
     out["BP"] = 1.0 / pb if (pb and pb > 0) else np.nan

@@ -3,8 +3,8 @@
 规则（v1.18）：
   - 训练 250 个交易日 → 测试 60 个交易日，按 60 日向前滚动，每期重新定权（不偷看测试期）
   - 训练期最后 5 个交易日不参与定权（它们的 5 日标签会伸进测试期，避免前视）
-  - 因子：动量20 / 反转5 / 波动率20 / 换手20 / 换手变化 / EP / BP / ROE / 净利润增速 /
-          营收增速 / 净利率 / 现金流质量（财务因子按 pubDate 严格对齐，只用已公布数据）
+  - 因子：动量20 / 反转5 / 波动率20 / 换手20 / 换手变化 / MACD柱 / KDJ_J / EP / BP / ROE /
+          净利润增速 / 营收增速 / 净利率 / 现金流质量（财务因子按 pubDate 严格对齐，只用已公布数据）
   - 去冗余：训练期内截面相关 >= 0.70 的因子只留 |IC| 更强的
   - 两种调仓规则：
       fixed：每 REBAL 个交易日全换仓（旧规则，成本高）
@@ -59,14 +59,18 @@ LOOKBACK_DAYS = 1150   # 自然日 ≈ 780 个交易日，够 250 训练 + 8 期
 
 
 def _download(code: str, start: str, end: str, refresh: bool) -> pd.DataFrame | None:
-    """新浪日线（1023 根、无限流）为主，东财作兜底。返回 日期/收盘/成交量(股)。"""
+    """新浪日线为主，东财兜底。统一返回 日期/收盘/最高/最低/成交量，供MACD/KDJ使用。"""
     f = CACHE / f"hist_{code}.csv"
+    required = {"日期", "收盘", "最高", "最低", "成交量"}
     if f.exists() and not refresh:
         try:
             h = pd.read_csv(f, dtype={"代码": str})
-            if len(h) > 300:
+            if len(h) > 300 and required.issubset(h.columns):
                 h["日期"] = pd.to_datetime(h["日期"])
-                return h
+                # 个别旧缓存覆盖更早区间，也必须按本次起点裁剪，避免拉长公共滚动窗口
+                h = h[h["日期"] >= pd.to_datetime(f"{start[:4]}-{start[4:6]}-{start[6:]}")]
+                if len(h) > 300:
+                    return h.reset_index(drop=True)
         except Exception:
             pass
     n = str(code).zfill(6)
@@ -78,16 +82,17 @@ def _download(code: str, start: str, end: str, refresh: bool) -> pd.DataFrame | 
         j = requests.get(u, timeout=20, headers={"User-Agent": "Mozilla/5.0"}).json()
         if isinstance(j, list) and len(j) > 300:
             h = pd.DataFrame(j).rename(columns={"day": "日期", "close": "收盘",
-                                                "volume": "成交量"})
+                                                "high": "最高", "low": "最低", "volume": "成交量"})
             h["日期"] = pd.to_datetime(h["日期"])
-            for c in ["收盘", "成交量"]:
+            for c in ["收盘", "最高", "最低", "成交量"]:
                 h[c] = pd.to_numeric(h[c], errors="coerce")
-            h = h.dropna(subset=["收盘"]).sort_values("日期").reset_index(drop=True)
+            h = h.dropna(subset=["收盘", "最高", "最低"]).sort_values("日期").reset_index(drop=True)
             h = h[h["日期"] >= pd.to_datetime(f"{start[:4]}-{start[4:6]}-{start[6:]}")]
             if len(h) < 300:
                 return None
-            h[["日期", "收盘", "成交量"]].to_csv(f, index=False, encoding="utf-8-sig")
-            return h[["日期", "收盘", "成交量"]]
+            out = h[["日期", "收盘", "最高", "最低", "成交量"]]
+            out.to_csv(f, index=False, encoding="utf-8-sig")
+            return out
     except Exception:
         pass
     # 东财兜底（可能被限流，只试一次）
@@ -99,7 +104,7 @@ def _download(code: str, start: str, end: str, refresh: bool) -> pd.DataFrame | 
             return None
         h["日期"] = pd.to_datetime(h["日期"])
         h = h.sort_values("日期").reset_index(drop=True)
-        out = h[["日期", "收盘", "成交量"]]
+        out = h[["日期", "收盘", "最高", "最低", "成交量"]]
         out.to_csv(f, index=False, encoding="utf-8-sig")
         return out
     except Exception:

@@ -649,7 +649,7 @@ def review_conclusion(rv: pd.DataFrame) -> str:
         text += f" 止损纪律避免了约 {saved:.0f} 元额外亏损。"
     return text
 
-APP_VERSION = "v1.18.5"     # v1.18.5 东财单步短超时+限流探测，新浪兜底真正生效；复盘缓存键随版本失效
+APP_VERSION = "v1.19"       # v1.19 MACD柱与KDJ_J接入多因子IC动态定权
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 st.title("📈 每日选股")
