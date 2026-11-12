@@ -63,17 +63,18 @@ news_risk = st.cache_data(ttl=3600, show_spinner=False)(news_risk_impl)
 
 def market_temperature_impl() -> tuple:
     """大盘温度：沪深300最新收盘 vs 60日均线。
-    返回 (最新收盘, MA60, 是否低温期)。低温期=收盘在MA60下方，系统性下跌段，应空仓。"""
+    返回 (最新收盘, MA60, 是否低温期)。低温期=收盘在MA60下方，系统性下跌段，应空仓。
+    走 _index_series（东财5秒 + 新浪兜底），东财限流时也不至于启动卡10秒。"""
     try:
         end_d = dt.date.today()
-        idx = ak.index_zh_a_hist(symbol="000300", period="daily",
-                                 start_date=(end_d - dt.timedelta(days=200)).strftime("%Y%m%d"),
-                                 end_date=end_d.strftime("%Y%m%d"))
-        close = float(idx.iloc[-1]["收盘"])
-        ma60 = float(idx["收盘"].tail(60).mean())
+        s = _index_series(pd.Timestamp(end_d - dt.timedelta(days=200)), end_d)
+        if s is None or len(s) < 60:
+            return 0.0, 0.0, False                 # 接口失败时不阻塞选股
+        close = float(s.iloc[-1])
+        ma60 = float(s.tail(60).mean())
         return close, ma60, close < ma60
     except Exception:
-        return 0.0, 0.0, False                     # 接口失败时不阻塞选股
+        return 0.0, 0.0, False
 
 
 # 缓存包装：web UI 一律调 market_temperature；裸运行环境请调 market_temperature_impl
@@ -407,6 +408,7 @@ def _confidence(n_done: int, threshold: int) -> float:
 REVIEW_FILE = Path(__file__).parent / "推送记录.csv"   # GitHub Actions 每日推送留档
 REVIEW_N = 10            # 默认复盘最近10个推送批次（按日期+推送时间整批保留，不切断批次）
 REVIEW_DAYS = 20         # 推荐后最长跟踪20个交易日（与策略持有期一致），触发止盈/止损即出结果
+REVIEW_CACHE_KEY = "v1.18.5"   # 改这里（或随版本号）可强制让复盘缓存失效，避免读到旧的错误结果
 
 
 def _run_with_timeout(fn, *args, timeout=8, **kwargs):
@@ -423,27 +425,29 @@ def _run_with_timeout(fn, *args, timeout=8, **kwargs):
 
 
 def _index_series(start: pd.Timestamp, end: dt.date):
-    """沪深300日线（日期->收盘），供复盘做基准对比；接口失败返回 None，不影响复盘本身。
-    东财限流时自动降级到新浪（sh000300 日线），避免复盘里基准列整列空白。"""
+    """沪深300日线（日期->收盘），供复盘做基准对比、大盘温度使用。
+    新浪优先（快且稳定），失败再试东财；都失败返回 None，不影响复盘本身。"""
+    try:
+        u = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+             "CN_MarketData.getKLineData?symbol=sh000300&scale=240&ma=no&datalen=120")
+        j = requests.get(u, timeout=8, headers={"User-Agent": "Mozilla/5.0"}).json()
+        s = pd.Series([float(x["close"]) for x in j],
+                      index=pd.to_datetime([x["day"] for x in j]))
+        if len(s) >= 20:
+            return s.sort_index()
+    except Exception:
+        pass
     idx = _run_with_timeout(
         ak.index_zh_a_hist, symbol="000300", period="daily",
         start_date=(start - dt.timedelta(days=10)).strftime("%Y%m%d"),
-        end_date=end.strftime("%Y%m%d"), timeout=10)
+        end_date=end.strftime("%Y%m%d"), timeout=5)
     try:
         if idx is not None and len(idx):
             s = pd.Series(idx["收盘"].astype(float).values, index=pd.to_datetime(idx["日期"]))
             return s.sort_index()
     except Exception:
         pass
-    try:
-        u = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
-             "CN_MarketData.getKLineData?symbol=sh000300&scale=240&ma=no&datalen=120")
-        j = requests.get(u, timeout=10, headers={"User-Agent": "Mozilla/5.0"}).json()
-        s = pd.Series([float(x["close"]) for x in j],
-                      index=pd.to_datetime([x["day"] for x in j]))
-        return s.sort_index()
-    except Exception:
-        return None
+    return None
 
 
 def _sina_history(code: str) -> pd.DataFrame:
@@ -462,16 +466,22 @@ def _sina_history(code: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def _hist_any(code: str, start: str, end: str) -> pd.DataFrame:
-    """取历史日线：优先东财（前复权），失败/为空时降级新浪（不复权）"""
-    h = get_history_impl(code, start, end)
-    if h is None or len(h) == 0:
-        return _sina_history(code)
-    return h
+def _hist_any(code: str, start: str, end: str, try_em: bool = True) -> pd.DataFrame:
+    """取历史日线：新浪优先（约0.5秒/只且不复权，与推送现价同口径），失败再试东财（5秒上限）。
+    东财单步必须短超时——否则外层超时会把整个函数（含兜底）一起掐断，兜底永远用不上。"""
+    h = _sina_history(code)
+    if h is not None and len(h) > 0:
+        return h
+    if try_em:
+        h = _run_with_timeout(get_history_impl, code, start, end, timeout=5)
+        if h is not None and len(h) > 0:
+            return h
+    return pd.DataFrame()
 
 
-def review_impl() -> pd.DataFrame:
+def review_impl(_key: str = "") -> pd.DataFrame:
     """复盘最近 REVIEW_N 个推送批次（同一天多次推送按「推送时间」分批，整批保留）：
+    _key 仅用于让缓存键随版本变化，避免升级后仍读到旧的错误缓存（业务上不使用）。
     推荐日后最长跟踪 REVIEW_DAYS 个交易日（与策略持有期一致），逐日判定谁先触发
     止盈(+10%)/止损(-5%)；满20日未触发按到期收盘定盈亏（🏁）；
     未满20日且未触发标 ⏳持有中，不计入胜率。同时给出同期沪深300涨跌幅作基准。
@@ -506,23 +516,27 @@ def review_impl() -> pd.DataFrame:
     # 并行预取所有股票历史：东财 hang 时每只最多 8 秒，6 线程并行，总耗时≈8~10 秒而非串行累加
     import concurrent.futures as _cf
     _hist_cache: dict = {}
-    _jobs = []
+    _starts: dict = {}                     # 代码 -> 该票最早的推荐日（同一只票只拉一次历史）
     for _, r in df.iterrows():
         try:
-            _jobs.append((str(r["代码"]).strip().zfill(6)[-6:], pd.Timestamp(str(r["日期"]).strip())))
+            _c = str(r["代码"]).strip().zfill(6)[-6:]
+            _d = pd.Timestamp(str(r["日期"]).strip())
         except Exception:
             continue
+        _starts[_c] = min(_d, _starts.get(_c, _d))
+    _jobs = list(_starts.items())
     if _jobs:
-        _ex = _cf.ThreadPoolExecutor(max_workers=6)
+        _ex = _cf.ThreadPoolExecutor(max_workers=8)
         _futs = {_ex.submit(_run_with_timeout, _hist_any, cd,
-                            rd.strftime("%Y%m%d"), end_d.strftime("%Y%m%d"), timeout=15): (cd, rd)
-                 for cd, rd in _jobs}
+                            sd.strftime("%Y%m%d"), end_d.strftime("%Y%m%d"),
+                            timeout=12): cd
+                 for cd, sd in _jobs}
         for _f in _cf.as_completed(_futs):
-            _cd, _rd = _futs[_f]
+            _cd = _futs[_f]
             try:
-                _hist_cache[(_cd, _rd)] = _f.result()
+                _hist_cache[_cd] = _f.result()
             except Exception:
-                _hist_cache[(_cd, _rd)] = None
+                _hist_cache[_cd] = None
         _ex.shutdown(wait=False)
     rows = []
     for _, r in df.iterrows():
@@ -535,7 +549,7 @@ def review_impl() -> pd.DataFrame:
         if price0 <= 0:
             continue
         code = str(r["代码"]).strip().zfill(6)[-6:]
-        h = _hist_cache.get((code, rec_date))
+        h = _hist_cache.get(code)
         future = pd.Series(dtype=float)
         fdates = pd.Series(dtype="datetime64[ns]")
         if h is not None and len(h) > 0:
@@ -547,8 +561,8 @@ def review_impl() -> pd.DataFrame:
             _same = h.loc[pd.to_datetime(h["日期"]) == rec_date, "收盘"]
             if len(_same):
                 _q0 = float(_same.iloc[-1])
-                # 除权/送股会让复权价与推送时的现价错位，偏差>3% 时用当日复权收盘对齐
-                if _q0 > 0 and abs(_q0 / price0 - 1) > 0.03:
+                # 只有明显除权（偏差>15%）才用当日收盘对齐；盘中推送价与收盘价差几个点属正常波动，不能替换
+                if _q0 > 0 and abs(_q0 / price0 - 1) > 0.15:
                     base_px = _q0
         stop_px, take_px = base_px * (1 - STOP_LOSS_PCT), base_px * (1 + TAKE_PROFIT_PCT)
         label, judge_px, judge_i = None, None, None
@@ -568,7 +582,7 @@ def review_impl() -> pd.DataFrame:
                 label = "🏁到期盈利" if judge_px >= base_px else "🏁到期亏损"
             else:
                 judge_i = n - 1
-                judge_px = float(future.iloc[n - 1]) if n > 0 else price0
+                judge_px = float(future.iloc[n - 1]) if n > 0 else base_px   # 当日新推：起点=基准，盈亏必为0
                 label = f"⏳持有中(第{n}天)" if n > 0 else "⏳持有中(当日新推)"
         judge_date = (fdates.iloc[judge_i]
                       if judge_i is not None and judge_i >= 0 else rec_date)
@@ -603,8 +617,8 @@ def review_impl() -> pd.DataFrame:
     return out.sort_values(["日期", "推送时间"], ascending=[False, False]).reset_index(drop=True)
 
 
-# 缓存包装：web UI 一律调 review_performance；ttl=6小时，同一天内重复打开秒开
-review_performance = st.cache_data(ttl=21600, show_spinner="正在自动复盘最近推荐表现...")(review_impl)
+# 缓存包装：web UI 一律调 review_performance(REVIEW_CACHE_KEY)；30分钟内重复点秒开
+review_performance = st.cache_data(ttl=1800, show_spinner="正在自动复盘最近推荐表现...")(review_impl)
 
 
 def review_conclusion(rv: pd.DataFrame) -> str:
@@ -635,14 +649,14 @@ def review_conclusion(rv: pd.DataFrame) -> str:
         text += f" 止损纪律避免了约 {saved:.0f} 元额外亏损。"
     return text
 
-APP_VERSION = "v1.18.4"     # v1.18.4 复盘增加新浪行情兜底，东财限流时不再全显示"当日新推"
+APP_VERSION = "v1.18.5"     # v1.18.5 东财单步短超时+限流探测，新浪兜底真正生效；复盘缓存键随版本失效
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 st.title("📈 每日选股")
 st.caption(APP_VERSION)
 
 # ---------------- 大盘温度横幅（低温期提示空仓） ----------------
-_idx_result = _run_with_timeout(market_temperature, timeout=10)
+_idx_result = _run_with_timeout(market_temperature, timeout=20)
 idx_close, idx_ma60, market_cold = _idx_result or (0.0, 0.0, False)
 if idx_close <= 0 or idx_ma60 <= 0:
     st.warning("大盘温度暂时不可用（行情接口超时），已跳过检查，不影响选股和复盘。")
@@ -1075,7 +1089,7 @@ with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}批）", expanded=F
         st.caption("点击上方按钮加载复盘（需联网拉历史行情，约10~20秒）。"
                    "云端启动时不自动执行，避免数据源 hang 住拖垮整个页面。")
     else:
-        rv = review_performance()
+        rv = review_performance(REVIEW_CACHE_KEY)
         if len(rv) == 0:
             st.caption("暂无历史推荐，有推荐后会自动复盘。")
         else:

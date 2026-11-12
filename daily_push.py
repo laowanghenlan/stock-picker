@@ -84,7 +84,7 @@ LOG_FILE = Path(__file__).parent / "推送记录.csv"       # 推送留档，供
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.18.3"
+APP_VERSION = "v1.18.5"
 
 
 def _mark_sent_today() -> None:
