@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 import akshare as ak
+import factors  # L1 多因子层：动量/波动率/换手/估值 + 行业中性 + 20日IC均值配权
 import pandas as pd
 import requests
 
@@ -646,9 +647,6 @@ def _trade_stats(sig: pd.DataFrame) -> tuple[float, float]:
     avg_win = sum(wins) / len(wins) * 100 if wins else 0.0
     avg_loss = abs(sum(losses) / len(losses)) * 100 if losses else 0.0
     return avg_win, avg_loss
-
-
-import factors  # L1 多因子层：动量/波动率/换手/估值 + 行业中性 + 20日IC均值配权
 
 
 def _num(v):
