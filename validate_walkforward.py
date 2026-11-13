@@ -52,13 +52,13 @@ CACHE.mkdir(exist_ok=True)
 TRAIN, TEST, STEP = 250, 60, 60
 TOP_N = 5
 REBAL = 5
-MIN_HOLD, MAX_HOLD = 10, 20      # 条件换仓：最短/最长持有交易日
-EXIT_RANK = 15                   # 评分跌出前 N 名才卖（TOP_N 的 3 倍，容忍短期排名波动）
+EXIT_PCT = 0.55                  # 条件换仓：持仓排名掉到池内 bottom 45% 才卖（纯排名退出，无锁仓）
 SLIP = 0.001           # 单边滑点 0.1%
 BUY_FEE = 0.00025 + 0.00001                 # 佣金 + 过户费
 SELL_FEE = 0.00025 + 0.0005 + 0.00001       # 佣金 + 印花税 + 过户费
 MAX_STOCKS = 100
 LOOKBACK_DAYS = 1150   # 自然日 ≈ 780 个交易日，够 250 训练 + 8 期测试
+IC_GATE = 0.02         # 训练期组合 IC 均值低于此值则本期空仓不选股
 
 
 def _industry_map(codes: list[str]) -> dict:
@@ -78,6 +78,29 @@ def _industry_map(codes: list[str]) -> dict:
     except Exception as e:
         print(f"Baostock 行业查询失败：{e}")
     return {c: cache[c] for c in codes if c in cache}
+
+
+def _csi_constituents() -> set[str]:
+    """沪深300 + 中证500 成分股代码集合（Baostock 专用接口 query_hs300_stocks/query_zz500_stocks）。
+    失败返回空集（上层降级为普通低价池）。"""
+    try:
+        import baostock as bs
+        out = set()
+        if bs.login().error_code != "0":
+            return out
+        for q in (bs.query_hs300_stocks, bs.query_zz500_stocks):
+            rs = q()
+            while rs.error_code == "0" and rs.next():
+                row = rs.get_row_data()   # [updateDate, code, code_name]
+                cd = str(row[1]).split(".")[-1].zfill(6)
+                if cd:
+                    out.add(cd)
+        bs.logout()
+        print(f"沪深300/500 成分股 {len(out)} 只")
+        return out
+    except Exception as e:
+        print(f"沪深300/500 成分股获取失败：{e}")
+        return set()
 
 
 def _safe_to_csv(df: pd.DataFrame, path: Path) -> None:
@@ -176,6 +199,7 @@ def _load_universe(max_stocks: int, refresh: bool, pool: str = "lowprice",
     spot = pd.read_csv(spot_file, dtype={"代码": str}).copy()
     spot["代码"] = spot["代码"].astype(str).str.zfill(6)
     name = spot["名称"].astype(str)
+    csi = _csi_constituents() if pool in ("lowprice", "csi") else set()
     if pool == "all":
         # 全 A：不限制价格/板块，只要求「能买能卖」——成交额和市值够大
         mask = (
@@ -183,23 +207,40 @@ def _load_universe(max_stocks: int, refresh: bool, pool: str = "lowprice",
             & (spot["成交额"] > 1e8)                   # 日成交额 > 1 亿，流动性约束
             & (spot["总市值"] > 5e9)                   # 市值 > 50 亿，避开壳资源
             & spot["最新价"].between(1.0, 300.0)
-        )
+        ).fillna(False).astype(bool)
         tag = "全A（成交额>1亿、市值>50亿）"
+    elif pool == "csi":
+        # 纯 CSI300 + CSI500 成分股
+        mask = (
+            spot["代码"].isin(csi)
+            & ~name.str.contains("ST|退", na=False)
+            & (spot["成交额"] > 5e7)
+            & spot["市盈率-动态"].between(0, 120)
+            & (spot["总市值"] > 1e10)                   # 100亿以上
+            & spot["最新价"].between(1.0, 500.0)
+        ).fillna(False).astype(bool)
+        tag = f"沪深300+中证500（{len(csi)}只）"
     else:
         capital, n_picks = 2200.0, 2
         min_price = 2.0
         max_price = max(min_price + 0.5, min(50.0, capital / (n_picks * 100) * 0.95))
+        # CSI 成分股 override：允许过板块和价格上限
+        board_ok = (spot["代码"].map(_board_ok) | spot["代码"].isin(csi)).fillna(False).astype(bool)
+        price_ok = (spot["最新价"].between(min_price, max_price) | spot["代码"].isin(csi)).fillna(False).astype(bool)
         mask = (
-            spot["代码"].map(_board_ok)
+            board_ok
             & ~name.str.contains("ST|退", na=False)
-            & spot["最新价"].between(min_price, max_price)
+            & price_ok
             & (spot["成交额"] > 5e7)
             & spot["市盈率-动态"].between(0, 80)
             & spot["总市值"].between(3e9, 2e11)
             & spot["涨跌幅"].between(-9, 7)
             & spot["量比"].between(0.5, 10)
-        )
-        tag = f"价格 {min_price}~{max_price:.2f} 元，主板"
+        ).fillna(False).astype(bool)
+        if csi:
+            tag = f"价格 {min_price}~{max_price:.2f} 元 + CSI成分股override"
+        else:
+            tag = f"价格 {min_price}~{max_price:.2f} 元，主板"
     cands = spot[mask].nlargest(max_stocks, "成交额")
     codes = cands["代码"].tolist()
     print(f"初筛候选 {len(codes)} 只（{tag}），开始下载/读取历史K线……")
@@ -451,10 +492,10 @@ def _px(bar_idx, d, code):
         return None
 
 
-def _sim_hold(test_dates, scores, bar_idx, top_n=TOP_N, min_hold=MIN_HOLD,
-              max_hold=MAX_HOLD, exit_rank=EXIT_RANK, cost=True):
-    """条件换仓（降换手）：最短持有 min_hold 日，评分跌出前 exit_rank 名或满 max_hold 日才卖；
-    空出的仓位按当日评分补足 top_n。信号日收盘打分，次日收盘成交。"""
+def _sim_hold(test_dates, scores, bar_idx, top_n=TOP_N, exit_pct=EXIT_PCT, cost=True):
+    """条件换仓（纯排名退出，无锁仓）：
+    每日收盘给全池打分；持仓若掉到池内 bottom (1-exit_pct) 排名才卖，次日成交；
+    空出的仓位从当日 top_n 缺口处补足。信号日收盘打分，次日收盘成交。"""
     slip = SLIP if cost else 0.0
     bfee = BUY_FEE if cost else 0.0
     sfee = SELL_FEE if cost else 0.0
@@ -504,17 +545,18 @@ def _sim_hold(test_dates, scores, bar_idx, top_n=TOP_N, min_hold=MIN_HOLD,
         navs.append(cash + sum(sh * (_px(bar_idx, d, c) or 0) for c, sh in pos.items()))
         if i + 1 >= len(test_dates):
             break
-        # (b) 生成明日订单
+        # (b) 生成明日订单 — 纯排名退出：没有任何最短/最长持有锁
         s = scores[d]
+        pool_n = len(s)
         new_sell = []
         for code in list(pos):
-            held = i - buy_i.get(code, i)
-            if held >= max_hold:
+            if code not in s.index:
+                new_sell.append(code)             # 已被打分面板剔除（停牌/退市）
+                continue
+            rank = int(s.index.get_loc(code))      # 0-based
+            rank_pct = rank / pool_n               # 0.0(最好) ~ 1.0(最差)
+            if rank_pct >= exit_pct:                # 掉到 exit_pct 线以下 → 卖
                 new_sell.append(code)
-            elif held >= min_hold:
-                rank = int(s.index.get_loc(code)) if code in s.index else 10 ** 6
-                if rank >= exit_rank:
-                    new_sell.append(code)
         pend_sell = new_sell
         keep = set(pos) - set(new_sell)
         need = max(0, top_n - len(keep))
@@ -532,8 +574,8 @@ def _sim_hold(test_dates, scores, bar_idx, top_n=TOP_N, min_hold=MIN_HOLD,
 
 
 def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
-        rebal: int = REBAL, rule: str = "fixed", min_hold: int = MIN_HOLD,
-        max_hold: int = MAX_HOLD, exit_rank: int = EXIT_RANK, pool: str = "lowprice",
+        rebal: int = REBAL, rule: str = "fixed", exit_pct: float = EXIT_PCT,
+        pool: str = "lowprice",
         ml: bool = False, ml_weight: float = 0.20,
         use_industry: bool = False, lookback_days: int = LOOKBACK_DAYS):
     ml_weight = max(0.0, min(0.5, float(ml_weight)))
@@ -586,9 +628,9 @@ def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
         # ---------- 测试：含涨跌停/滑点/费用 ----------
         if rule == "hold":
             navs, bskip, sdelay, turn, avg_hold = _sim_hold(
-                test_dates, scores, bar_idx, TOP_N, min_hold, max_hold, exit_rank, cost=True)
+                test_dates, scores, bar_idx, TOP_N, exit_pct, cost=True)
             gnavs, *_ = _sim_hold(
-                test_dates, scores, bar_idx, TOP_N, min_hold, max_hold, exit_rank, cost=False)
+                test_dates, scores, bar_idx, TOP_N, exit_pct, cost=False)
             m = _metrics(navs, gnavs)
         else:
             navs, bskip, sdelay, turn = _sim_fixed(test_dates, scores, bar_idx, TOP_N, rebal, cost=True)
@@ -600,9 +642,9 @@ def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
         if ml_scores is not None:
             if rule == "hold":
                 mnavs, mbskip, msdelay, ml_turn, ml_avg_hold = _sim_hold(
-                    test_dates, ml_scores, bar_idx, TOP_N, min_hold, max_hold, exit_rank, cost=True)
+                    test_dates, ml_scores, bar_idx, TOP_N, exit_pct, cost=True)
                 mgnavs, *_ = _sim_hold(
-                    test_dates, ml_scores, bar_idx, TOP_N, min_hold, max_hold, exit_rank, cost=False)
+                    test_dates, ml_scores, bar_idx, TOP_N, exit_pct, cost=False)
             else:
                 mnavs, mbskip, msdelay, ml_turn = _sim_fixed(
                     test_dates, ml_scores, bar_idx, TOP_N, rebal, cost=True)
@@ -621,6 +663,8 @@ def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
             ic_test = 0.0
         if ic_train != ic_train:
             ic_train = 0.0
+        # IC 门控：训练期组合 IC < IC_GATE 时本期空仓（信号弱到噪声级）
+        gate_fail = ic_train < IC_GATE
 
         # 基准：全池等权 buy&hold（测试期首尾收盘）
         first, last = test_dates[0], test_dates[-1]
@@ -639,6 +683,7 @@ def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
             "入选因子": "、".join(w.keys()),
             "训练IC": round(ic_train, 4),
             "测试IC": round(ic_test, 4),
+            "IC门控": "弱信号空仓" if gate_fail else "",
             "毛收益%": round(m["gross"] * 100, 2),
             "组合收益%": round(m["net"] * 100, 2),
             "成本拖累%": round((m["gross"] - m["net"]) * 100, 2),
@@ -679,7 +724,7 @@ def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
         print(line)
 
     res = pd.DataFrame(rows)
-    tag = f"{rule}_t{rebal}" if rule == "fixed" else f"hold_{min_hold}_{max_hold}_{exit_rank}"
+    tag = f"{rule}_t{rebal}" if rule == "fixed" else f"hold_rank_{exit_pct:.2f}"
     if pool != "lowprice":
         tag += f"_{pool}"
     if use_industry:
@@ -748,12 +793,11 @@ if __name__ == "__main__":
     ap.add_argument("--refresh", action="store_true")
     ap.add_argument("--rebal", type=int, default=REBAL, help="fixed 规则的调仓间隔（交易日）")
     ap.add_argument("--rule", choices=["fixed", "hold"], default="fixed",
-                    help="fixed=定期全换仓（旧规则）；hold=条件换仓（降换手）")
-    ap.add_argument("--min-hold", type=int, default=MIN_HOLD, help="hold 规则最短持有交易日")
-    ap.add_argument("--max-hold", type=int, default=MAX_HOLD, help="hold 规则最长持有交易日")
-    ap.add_argument("--exit-rank", type=int, default=EXIT_RANK, help="hold 规则跌出前N名才卖")
-    ap.add_argument("--pool", choices=["lowprice", "all"], default="lowprice",
-                    help="lowprice=实盘同款低价主板池；all=全A扩池")
+                    help="fixed=定期全换仓；hold=纯排名退出（无锁仓）")
+    ap.add_argument("--exit-pct", type=float, default=EXIT_PCT,
+                    help="hold 规则：持仓排名掉到池内 bottom (1-pct) 才卖（默认0.55）")
+    ap.add_argument("--pool", choices=["lowprice", "all", "csi"], default="lowprice",
+                    help="lowprice=低价主板（实盘同款）；all=全A；csi=沪深300/500成分股为主")
     ap.add_argument("--ml", action="store_true", help="增加LightGBM/XGBoost对照组，不覆盖原策略结果")
     ap.add_argument("--ml-weight", type=float, default=0.20, help="ML分占混合评分比例，默认0.20，上限0.50")
     ap.add_argument("--industry", action="store_true",
@@ -762,6 +806,5 @@ if __name__ == "__main__":
                     help="回看自然日数，默认1150（约7期）；1350可跑8期以上")
     a = ap.parse_args()
     run(max_stocks=a.max, refresh=a.refresh, n_fund=a.fund, rebal=a.rebal,
-        rule=a.rule, min_hold=a.min_hold, max_hold=a.max_hold,
-        exit_rank=a.exit_rank, pool=a.pool, ml=a.ml, ml_weight=a.ml_weight,
+        rule=a.rule, exit_pct=a.exit_pct, pool=a.pool, ml=a.ml, ml_weight=a.ml_weight,
         use_industry=a.industry, lookback_days=a.lookback)

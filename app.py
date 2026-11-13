@@ -777,8 +777,31 @@ MAX_PRICE = max(MIN_PRICE + 0.5, min(50.0, capital / (n_picks * 100) * 0.95))
 # ---------------- 选股流水线（全部后台执行） ----------------
 def _board_ok(code: str) -> bool:
     """剔除小资金买不了或风险过高的板块：
-    300/301创业板(需10万门槛)、688科创板(50万门槛)、8/4/920北交所(50万门槛)"""
+    300/301创业板(需10万门槛)、688科创板(50万门槛)、8/4/920北交所(50万门槛)
+    沪深300/500 成分股由上层 override_board 放行，不走这里"""
     return not code.startswith(("300", "301", "688", "8", "4", "920"))
+
+
+def _csi_set() -> set:
+    """沪深300 + 中证500 成分股（Baostock 专用接口 query_hs300_stocks/query_zz500_stocks）；失败返回空集。"""
+    try:
+        import baostock as bs
+        out = set()
+        if bs.login().error_code != "0":
+            return out
+        for q in (bs.query_hs300_stocks, bs.query_zz500_stocks):
+            rs = q()
+            while rs.error_code == "0" and rs.next():
+                row = rs.get_row_data()   # [updateDate, code, code_name]
+                cd = str(row[1]).split(".")[-1].zfill(6)
+                if cd:
+                    out.add(cd)
+        bs.logout()
+        print(f"CSI300/500 成分股 {len(out)} 只")
+        return out
+    except Exception as e:
+        print(f"CSI 成分股获取失败：{e}")
+        return set()
 
 
 def screen_impl() -> pd.DataFrame:
@@ -789,11 +812,14 @@ def screen_impl() -> pd.DataFrame:
     df["代码"] = df["代码"].astype(str).str.zfill(6)
     lhb = lhb_codes_impl()                               # 龙虎榜名单（近一月）
     name = df["名称"].astype(str)
+    csi = _csi_set()
+    board_ok = df["代码"].map(_board_ok) | df["代码"].isin(csi)    # CSI成分股放行创业板/科创板
+    price_ok = df["最新价"].between(MIN_PRICE, MAX_PRICE) | df["代码"].isin(csi)
     mask = (
-        df["代码"].map(_board_ok)
+        board_ok
         & ~df["代码"].isin(lhb)                           # 剔除近一月上过龙虎榜的游资爆炒股
         & ~name.str.contains("ST|退", na=False)          # 剔除ST/退市股
-        & df["最新价"].between(MIN_PRICE, MAX_PRICE)      # 价格区间：2200元买2只也买得起
+        & price_ok                                       # CSI成分股允许突破MAX_PRICE上限
         & (df["成交额"] > 5e7)                            # 日成交额>5000万，保证能顺利卖出
         & df["市盈率-动态"].between(0, 80)                # 剔除亏损股和泡沫股
         & df["总市值"].between(3e9, 2e11)                 # 30亿~2000亿，避开微盘操纵股和超级大盘股
@@ -1049,6 +1075,12 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
         pass
     final_icw = blended_icw if blended_icw else base_icw
 
+    # 计算训练期组合IC（逐因子训练IC按权重加权，衡量当前因子池整体信号强弱）
+    per_ic = res.attrs.get("ic") or {}
+    ic_train_composite = float(
+        sum(float(per_ic.get(f, 0.0) or 0.0) * float(w) for f, w in final_icw.items())
+    ) if final_icw else 0.0
+
     # ========== 因子衰减过滤：连续30天|IC|<0.03的因子临时剔除 ==========
     health_df = pd.DataFrame()
     try:
@@ -1061,6 +1093,7 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
 
     res.attrs["ic_weights"] = final_icw
     res.attrs["ic_weights_base"] = base_icw
+    res.attrs["ic_train_composite"] = ic_train_composite          # 训练期组合IC（门控用）
     res.attrs["ic_actual"] = actual_ic_used
     res.attrs["blend_ratios"] = blend_ratios_used
     res.attrs["factor_health"] = health_df

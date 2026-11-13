@@ -81,6 +81,7 @@ CAPITAL = _load_capital()                             # 本金（元），web �
 TO_ADDR = os.environ["QQ_EMAIL"]                        # 收件邮箱（与发件邮箱相同）
 AUTH_CODE = os.environ["QQ_AUTH_CODE"]                  # QQ邮箱SMTP授权码（存于GitHub Secrets）
 LOG_FILE = Path(__file__).parent / "推送记录.csv"       # 推送留档，供周末复盘用
+IC_GATE = 0.02                                        # 训练期组合IC低于此值则今日空仓（信号太弱）
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
@@ -253,6 +254,13 @@ def _collect() -> dict:
             d["note"] = "行情数据源暂时不可用（东财限流/新浪无有效返回），本次无法完成验证，不建议据此操作。"
         else:
             d["note"] = "候选股均未通过验证，今日不建议买入。"
+        return d
+    # IC 门控：训练期组合IC < IC_GATE → 信号偏弱，今日空仓
+    ic_train = float(res.attrs.get("ic_train_composite") or 0.0)
+    if ic_train < IC_GATE:
+        d["note"] = f"因子近期信号偏弱（训练期组合IC={ic_train:+.4f} < {IC_GATE}），今日空仓不选股。"
+        d["ic_train"] = round(ic_train, 4)
+        d["ic_gate"] = True
         return d
     _nf = res.attrs.get("news_failed", [])
     if _nf:
