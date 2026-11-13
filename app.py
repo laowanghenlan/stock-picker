@@ -207,6 +207,47 @@ def load_settings() -> dict:
         return dict(DEFAULT_SETTINGS)
 
 
+# 网页改本金后提交到仓库，GitHub Actions 的每日邮件才能读到同一个值
+GH_REPO = "laowanghenlan/stock-picker"
+GH_SETTINGS_PATH = "推荐设置.json"
+GH_BRANCH = "master"
+
+
+def _gh_token() -> str:
+    try:
+        tok = st.secrets.get("GH_TOKEN", "")
+    except Exception:
+        tok = ""
+    return str(tok or os.environ.get("GH_TOKEN", "") or "")
+
+
+def save_settings(capital: float) -> tuple[bool, str]:
+    """把本金写回 推荐设置.json：先写本地（本地运行立即生效），
+    再用 GH_TOKEN 提交到 GitHub，每日邮件才能读到新本金。
+    返回 (是否已同步到GitHub, 给用户看的提示)。"""
+    text = json.dumps({"capital": round(float(capital), 2)}, ensure_ascii=False, indent=2)
+    try:
+        SETTINGS_FILE.write_text(text, encoding="utf-8")
+    except Exception:
+        pass
+    token = _gh_token()
+    if not token:
+        return False, f"本金已改为 {capital:.0f} 元（未配置 GH_TOKEN，邮件推送暂不同步）"
+    url = f"https://api.github.com/repos/{GH_REPO}/contents/{GH_SETTINGS_PATH}"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    try:
+        r = requests.get(url, headers=headers, params={"ref": GH_BRANCH}, timeout=15)
+        body = {"message": f"网页更新本金为 {capital:.0f} 元",
+                "content": base64.b64encode(text.encode("utf-8")).decode(),
+                "branch": GH_BRANCH}
+        if r.status_code == 200:
+            body["sha"] = r.json()["sha"]
+        requests.put(url, headers=headers, json=body, timeout=15).raise_for_status()
+        return True, f"本金已保存为 {capital:.0f} 元，下次邮件按新本金计算"
+    except Exception as e:
+        return False, f"本金已在本页生效，但同步到 GitHub 失败：{str(e)[:60]}"
+
+
 def load_holdings() -> pd.DataFrame:
     """读取本地持仓记录（代码/成本价/股数），没有则返回空白模板"""
     if HOLDINGS_FILE.exists():
@@ -695,7 +736,7 @@ def review_conclusion(rv: pd.DataFrame) -> str:
         text += f" 止损纪律避免了约 {saved:.0f} 元额外亏损。"
     return text
 
-APP_VERSION = "v1.22.1"     # v1.22.1 本金输入去掉上下限，可自由输入任意金额
+APP_VERSION = "v1.22.2"     # v1.22.2 邮件去掉GitHub改本金入口，网页输入本金自动保存并同步邮件
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 st.title("📈 每日选股")
@@ -729,12 +770,21 @@ with st.expander("💼 持仓体检（自动读持仓.csv，选股时自动执�
 
 # ---------------- 侧边栏：只保留本金输入（行情/复盘/因子/熔断全部自动） ----------------
 with st.sidebar:
+    def _on_capital_change():
+        """输入框改完自动保存，避免网页和每日邮件各用一套本金"""
+        _v = float(st.session_state.get("capital_input", 0) or 0)
+        if _v > 0 and abs(_v - float(load_settings()["capital"])) > 1e-9:
+            st.session_state["_capital_msg"] = save_settings(_v)
+
     # 本金不设上下限：想投多少就输多少，只要求大于0（后面要用它算仓位和股价上限）
     capital = st.number_input("💰 本金（元）", min_value=1.0, max_value=None,
                               value=float(load_settings()["capital"]), step=100.0,
-                              format="%.0f",
-                              help="可自由输入任意金额，本次修改仅当前页面生效；"
-                                   "想改每日邮件推送的默认本金，请编辑仓库里的 推荐设置.json")
+                              format="%.0f", key="capital_input",
+                              on_change=_on_capital_change,
+                              help="输入后自动保存，网页与每日邮件共用同一个本金")
+    _cap_msg = st.session_state.pop("_capital_msg", None)
+    if _cap_msg:
+        (st.success if _cap_msg[0] else st.info)(_cap_msg[1])
     n_picks = auto_pick_count(capital)
     st.caption(f"只数由本金+预期收益自动计算（当前约 {n_picks} 只起）")
     st.caption(f"行情快照时间：{spot_cache_time()}")

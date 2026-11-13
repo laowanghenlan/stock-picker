@@ -84,7 +84,7 @@ LOG_FILE = Path(__file__).parent / "推送记录.csv"       # 推送留档，供
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.22.1"
+APP_VERSION = "v1.22.2"
 
 
 def _mark_sent_today() -> None:
@@ -396,11 +396,9 @@ def _render_text(d: dict) -> str:
 
     lines += ["", "纪律：跌破止损价无条件卖出；持有超20个交易日不涨也卖。",
               "",
-              "📊 网页版（点开自动看复盘，无需任何操作）：",
+              "📊 网页版（点开自动看复盘，左侧输入框可直接改本金）：",
               "https://stock-picker-mi5bntxj6x4fzrntgtzvko.streamlit.app/",
-              f"💰 改本金（当前 {d['capital']:.0f} 元；点链接 → 铅笔图标 → 改数字 → 绿色Commit，下次邮件生效）：",
-              "https://github.com/laowanghenlan/stock-picker/blob/master/推荐设置.json",
-              f"🔖 版本 {APP_VERSION}  ·  仓库：https://github.com/laowanghenlan/stock-picker",
+              f"🔖 版本 {APP_VERSION}  ·  当前本金 {d['capital']:.0f} 元  ·  仓库：https://github.com/laowanghenlan/stock-picker",
               "（本邮件为量化程序自动生成，仅为历史数据推演，不构成投资建议）"]
     return "\n".join(lines)
 
@@ -644,11 +642,8 @@ def _render_html(d: dict) -> str:
              "style=\"display:block;background:#1a73e8;color:#ffffff;text-align:center;padding:13px;"
              "border-radius:10px;font-size:14px;font-weight:700;text-decoration:none;\">"
              "打开网页版看完整复盘</a>")
-    h.append("<a href=\"https://github.com/laowanghenlan/stock-picker/blob/master/推荐设置.json\" "
-             "style=\"display:block;background:#ffffff;color:#1a73e8;text-align:center;padding:12px;"
-             "border-radius:10px;font-size:13px;font-weight:600;text-decoration:none;"
-             "border:1px solid #c9dcf8;margin-top:10px;\">"
-             f"修改本金（当前 {d['capital']:.0f} 元）</a>")
+    h.append(f"<div style=\"text-align:center;margin-top:10px;font-size:12.5px;color:#8b949e;\">"
+             f"改本金：打开网页，左侧输入框直接修改（当前 {d['capital']:.0f} 元）</div>")
 
     h.append("</div>")
     h.append(_html_footer(d))
