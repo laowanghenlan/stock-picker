@@ -771,8 +771,8 @@ with st.sidebar:
     st.caption(f"只数由本金+预期收益自动计算（当前约 {n_picks} 只起）")
     st.caption(f"行情快照时间：{spot_cache_time()}")
 
-# 股价上限：保证各只买100股也买得起；本金越大上限越宽，最高20元（保持低价股策略）
-MAX_PRICE = max(MIN_PRICE + 0.5, min(20.0, capital / (n_picks * 100) * 0.95))
+# 股价上限：保证各只买100股也买得起；本金越大上限越宽，最高50元
+MAX_PRICE = max(MIN_PRICE + 0.5, min(50.0, capital / (n_picks * 100) * 0.95))
 
 # ---------------- 选股流水线（全部后台执行） ----------------
 def _board_ok(code: str) -> bool:

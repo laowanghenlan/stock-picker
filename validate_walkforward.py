@@ -188,7 +188,7 @@ def _load_universe(max_stocks: int, refresh: bool, pool: str = "lowprice",
     else:
         capital, n_picks = 2200.0, 2
         min_price = 2.0
-        max_price = max(min_price + 0.5, min(20.0, capital / (n_picks * 100) * 0.95))
+        max_price = max(min_price + 0.5, min(50.0, capital / (n_picks * 100) * 0.95))
         mask = (
             spot["代码"].map(_board_ok)
             & ~name.str.contains("ST|退", na=False)
