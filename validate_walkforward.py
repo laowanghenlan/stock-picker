@@ -21,7 +21,7 @@
     python validate_walkforward.py --pool all --max 200  # 扩池到全 A（去掉低价小盘偏好）
     python validate_walkforward.py --industry            # 联网补齐行业（Baostock），按真实行业中性化
     python validate_walkforward.py --lookback 1350       # 拉长回看窗口，可跑 8 期以上
-    python validate_walkforward.py --fund 20             # 额外抓 20 只的 Baostock 财报，验证财务因子
+    python validate_walkforward.py --fund 20             # 只抓前20只财报（默认 -1=全部，与实盘一致）
     python validate_walkforward.py --refresh             # 忽略本地缓存重新下载
     python validate_walkforward.py --ml                  # 增加ML对照组，独立输出、不覆盖原结果
 
@@ -579,10 +579,13 @@ def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
         ml: bool = False, ml_weight: float = 0.20,
         use_industry: bool = False, lookback_days: int = LOOKBACK_DAYS):
     ml_weight = max(0.0, min(0.5, float(ml_weight)))
+    fund_all = n_fund < 0                 # -1 = 全部股票都抓财报（默认，与实盘一致）
     hists, meta = _load_universe(max_stocks, refresh, pool, use_industry, lookback_days)
     if len(hists) < 30:
         print("可用股票不足 30 只，终止。")
         return
+    if fund_all:
+        n_fund = len(hists)
     print(f"股票池 {len(hists)} 只，准备财报因子……")
     funds = _fundamentals(list(hists), n_fund)
     if funds:
@@ -731,13 +734,15 @@ def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
         tag += "_ind"
     if ml:
         tag += f"_ml{round(ml_weight * 100)}"
-    ic_file = (f"因子IC_样本外逐期_{tag}.csv" if (ml or use_industry)
+    if n_fund > 0:
+        tag += f"_fund{n_fund}"
+    ic_file = (f"因子IC_样本外逐期_{tag}.csv" if (ml or use_industry or n_fund > 0)
                else "因子IC_样本外逐期.csv")
     _safe_to_csv(res, HERE / f"滚动样本外验证_{tag}.csv")
     _safe_to_csv(pd.DataFrame(ic_rows), HERE / ic_file)
     if (not ml and rule == "fixed" and rebal == REBAL and pool == "lowprice"
-            and n_fund == 0 and not use_industry):
-        _safe_to_csv(res, HERE / "滚动样本外验证.csv")  # 默认口径保持旧文件名
+            and not use_industry and fund_all):
+        _safe_to_csv(res, HERE / "滚动样本外验证.csv")  # 默认口径（含财报因子，与实盘一致）
 
     # ---------- 汇总 ----------
     print("\n" + "=" * 70)
@@ -789,7 +794,8 @@ def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--max", type=int, default=MAX_STOCKS)
-    ap.add_argument("--fund", type=int, default=0, help="抓取多少只股票的Baostock财报")
+    ap.add_argument("--fund", type=int, default=-1,
+                    help="抓取多少只股票的Baostock财报：-1=全部（默认，与实盘一致），0=关闭")
     ap.add_argument("--refresh", action="store_true")
     ap.add_argument("--rebal", type=int, default=REBAL, help="fixed 规则的调仓间隔（交易日）")
     ap.add_argument("--rule", choices=["fixed", "hold"], default="fixed",
