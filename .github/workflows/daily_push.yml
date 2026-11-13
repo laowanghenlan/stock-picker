@@ -1,26 +1,24 @@
-# 周一至周五北京时间 7:00 自动选股并发送QQ邮件
-# GitHub 使用 UTC 时间，北京 7:00 = UTC 前一天 23:00（注意跨日，周一到周五对应 UTC 的周日到周四）
+# 周一至周五北京时间 8:00 与 20:00 各自动选股并发送QQ邮件
+# GitHub 使用 UTC 时间，北京 8:00 = UTC 0:00，北京 20:00 = UTC 12:00（同为当天，无跨日问题）
 #
 # 【可靠性设计】GitHub 自带 cron 是"尽力而为"，高负载时会延迟数十分钟甚至直接跳过（2026-11-11 就漏发过一次）。
-#   第一层：同一 cron 配 7 个时间点（7:00～9:00 每 20 分钟）；脚本内做"当天已发则跳过"判断，不会重复发信
-#          （2026-11-13 全天 0 次触发、11-12 三次延迟 11～15 小时，故加密触发点）
-#   第二层：外部 cron-job.org 每天调 workflow_dispatch API 兜底（手动触发 = 强制发送，不看当天是否已发）
+#   第一层：每个时段配 3 个触发点（准点 + 20 分 + 40 分）；脚本按时段判重，同一时段不会重复发信
+#          （2026-11-13 全天 0 次触发、11-12 三次延迟 11～15 小时，故保留冗余触发点）
+#   第二层：外部 cron-job.org 每天两次调 workflow_dispatch API 兜底（手动触发 = 强制发送，不看当天是否已发）
 name: 每日选股推送
 
 on:
   schedule:
-    # 北京时间 07:00 / 07:20 / 07:40（UTC 前一天 23 点）
-    - cron: '0,20,40 23 * * 0-4'
     # 北京时间 08:00 / 08:20 / 08:40（UTC 当天 0 点）
     - cron: '0,20,40 0 * * 1-5'
-    # 北京时间 09:00 最后兜底（A股 09:30 开盘前仍有意义）
-    - cron: '0 1 * * 1-5'
+    # 北京时间 20:00 / 20:20 / 20:40（UTC 当天 12 点）
+    - cron: '0,20,40 12 * * 1-5'
   workflow_dispatch:              # 手动 / cron-job.org 外部兜底触发（强制发送）
 
 permissions:
   contents: write                 # 允许工作流把推送记录回传仓库（新仓库默认只读，必须显式声明）
 
-# 同组任务串行：避免 9:00 那次被延迟后与 9:40 那次并发重复发信
+# 同组任务串行：避免 20:00 那次被延迟后与 20:20 那次并发重复发信
 concurrency:
   group: daily-push
   cancel-in-progress: false
@@ -43,7 +41,9 @@ jobs:
           QQ_EMAIL: ${{ secrets.QQ_EMAIL }}            # 在仓库 Settings→Secrets 里配置
           QQ_AUTH_CODE: ${{ secrets.QQ_AUTH_CODE }}    # QQ邮箱SMTP授权码
           CAPITAL: '2200'
-          # 手动/外部触发时强制发送（用于测试和 cron-job.org 兜底），定时触发则当天已发就跳过
+          # 时段标记：晚上那组 cron 记 pm，其余（早上那组/手动）记 am；脚本按时段判重，早晚互不影响
+          PUSH_SLOT: ${{ github.event.schedule == '0,20,40 12 * * 1-5' && 'pm' || 'am' }}
+          # 手动/外部触发时强制发送（用于测试和 cron-job.org 兜底），定时触发则同一时段已发就跳过
           PUSH_FORCE: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
         run: python daily_push.py
 
@@ -54,7 +54,7 @@ jobs:
         run: |
           git config user.name "stock-bot"
           git config user.email "stock-bot@local"
-          # 推送状态.json 是"今天已发过"的标记，必须回传，否则冗余 cron 会重复发信
+          # 推送状态.json 是"今天这个时段已发过"的标记，必须回传，否则冗余 cron 会重复发信
           git add 推送记录.csv 推送状态.json 因子历史IC.csv strategy_config.json fundamental_cache/ 实盘台账.csv 2>/dev/null || true
           git diff --cached --quiet || git commit -m "每日留档 + 进化配置 $(date +%F)"
           git pull --rebase --autostash origin master || true

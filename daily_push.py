@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-每日自动推送脚本（由 GitHub Actions 定时触发，周一至周五北京时间 7:00；7:40/8:20 冗余重试，当天已发则跳过）
+每日自动推送脚本（由 GitHub Actions 定时触发，周一至周五北京时间 8:00 与 20:00；
+同一天两个时段各自冗余重试，同一时段已发则跳过，早晚互不影响）
 流程：全市场筛选 -> 扣费回测 -> 舆情排雷 -> 本金+收益自动定只数 -> 分配本金 -> QQ邮箱推送
 邮件同时输出 HTML（卡片排版）与纯文本（兜底）两个版本
 """
@@ -42,18 +43,35 @@ def _append_log(rec) -> None:
     out.to_csv(LOG_FILE, index=False, encoding="utf-8-sig")
 
 
-def _already_sent_today() -> bool:
-    """当天是否已经推送过（冗余 cron 只发一次用）"""
+def _slot() -> str:
+    """推送时段：am=早上8点，pm=晚上8点。工作流按触发的 cron 注入 PUSH_SLOT；
+    手动/外部兜底触发不走判重（PUSH_FORCE=1），取默认 am 只为落标记。"""
+    return "pm" if os.environ.get("PUSH_SLOT") == "pm" else "am"
+
+
+def _sent_slots() -> set:
+    """读出今天已推送的时段集合；日期变了就重置。
+    旧格式只有 {"last_sent": 日期}，那时一天只发早上一次，按已发 am 处理。"""
     try:
-        return json.loads(STATE_FILE.read_text(encoding="utf-8")).get("last_sent") == _today()
+        st = json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except Exception:
-        return False                      # 读不到状态就按"没发过"处理，宁可重复也不漏发
+        return set()                      # 读不到状态就按"没发过"处理，宁可重复也不漏发
+    if st.get("last_sent") != _today():
+        return set()
+    slots = st.get("slots")
+    return set(slots) if isinstance(slots, list) else {"am"}
+
+
+def _already_sent() -> bool:
+    """当天这个时段是否已经推送过（冗余 cron 只发一次用）。
+    早晚两班各自判重：早上发过不影响晚上再发，晚上重试也不会重复。"""
+    return _slot() in _sent_slots()
 
 
 # 判重必须在 import app 之前：app 会连带加载 akshare 等重依赖，白等约 2 分钟
 # （PUSH_FORCE=1 表示手动触发 / cron-job.org 兜底，强制发送，便于测试和补发）
-if __name__ == "__main__" and os.environ.get("PUSH_FORCE") != "1" and _already_sent_today():
-    print("今日已推送过，跳过本次冗余触发")
+if __name__ == "__main__" and os.environ.get("PUSH_FORCE") != "1" and _already_sent():
+    print(f"今日 {_slot()} 时段已推送过，跳过本次冗余触发")
     sys.exit(0)
 
 import smtplib                                                  # noqa: E402
@@ -89,10 +107,13 @@ APP_VERSION = "v1.22.2"
 
 
 def _mark_sent_today() -> None:
-    """发送成功后落标记；由工作流回传仓库，供后续冗余触发判断"""
+    """发送成功后把今天这个时段记进状态；由工作流回传仓库，供后续冗余触发判断"""
     try:
+        slots = _sent_slots()
+        slots.add(_slot())
         STATE_FILE.write_text(
-            json.dumps({"last_sent": _today()}, ensure_ascii=False, indent=2),
+            json.dumps({"last_sent": _today(), "slots": sorted(slots)},
+                       ensure_ascii=False, indent=2),
             encoding="utf-8")
     except Exception as e:
         print("写入推送状态失败(不影响已发出的邮件):", e)
@@ -688,7 +709,8 @@ def send(text: str, html: str):
     msg = MIMEMultipart("alternative")
     msg["From"] = TO_ADDR
     msg["To"] = TO_ADDR
-    msg["Subject"] = Header(f"【{tag}】每日选股 {_today()[5:]}", "utf-8")
+    _slot_tag = "晚间" if _slot() == "pm" else "早间"
+    msg["Subject"] = Header(f"【{tag}】每日选股 {_today()[5:]}·{_slot_tag}", "utf-8")
     # 顺序不能反：先纯文本后 HTML，客户端会优先显示最后一段
     msg.attach(MIMEText(text, "plain", "utf-8"))
     msg.attach(MIMEText(html, "html", "utf-8"))
