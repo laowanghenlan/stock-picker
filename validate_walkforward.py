@@ -19,6 +19,8 @@
     python validate_walkforward.py --rule hold           # 降换手：条件换仓
     python validate_walkforward.py --rule hold --min-hold 10 --max-hold 20 --exit-rank 15
     python validate_walkforward.py --pool all --max 200  # 扩池到全 A（去掉低价小盘偏好）
+    python validate_walkforward.py --industry            # 联网补齐行业（Baostock），按真实行业中性化
+    python validate_walkforward.py --lookback 1350       # 拉长回看窗口，可跑 8 期以上
     python validate_walkforward.py --fund 20             # 额外抓 20 只的 Baostock 财报，验证财务因子
     python validate_walkforward.py --refresh             # 忽略本地缓存重新下载
     python validate_walkforward.py --ml                  # 增加ML对照组，独立输出、不覆盖原结果
@@ -57,6 +59,42 @@ BUY_FEE = 0.00025 + 0.00001                 # 佣金 + 过户费
 SELL_FEE = 0.00025 + 0.0005 + 0.00001       # 佣金 + 印花税 + 过户费
 MAX_STOCKS = 100
 LOOKBACK_DAYS = 1150   # 自然日 ≈ 780 个交易日，够 250 训练 + 8 期测试
+
+
+def _industry_map(codes: list[str]) -> dict:
+    """代码→证监会行业。用 Baostock 全市场行业表（一次查询，不逐股请求）。"""
+    cache: dict = {}
+    try:
+        import baostock as bs
+        if bs.login().error_code == "0":
+            rs = bs.query_stock_industry()
+            while rs.error_code == "0" and rs.next():
+                row = rs.get_row_data()      # [updateDate, code, name, industry, class]
+                cd = str(row[1]).split(".")[-1].zfill(6)
+                ind = str(row[3]).strip()
+                if ind:
+                    cache[cd] = ind
+            bs.logout()
+    except Exception as e:
+        print(f"Baostock 行业查询失败：{e}")
+    return {c: cache[c] for c in codes if c in cache}
+
+
+def _safe_to_csv(df: pd.DataFrame, path: Path) -> None:
+    """CSV 偶发被占用（杀软/索引），重试几次；仍失败则退到系统临时目录，避免整轮白跑。"""
+    import tempfile
+    import time
+    for i in range(10):
+        try:
+            df.to_csv(path, index=False, encoding="utf-8-sig")
+            return
+        except PermissionError:
+            if i < 9:
+                time.sleep(2)
+                continue
+            alt = Path(tempfile.gettempdir()) / path.name
+            df.to_csv(alt, index=False, encoding="utf-8-sig")
+            print(f"⚠ {path} 被占用，结果已改写到 {alt}")
 
 
 def _download(code: str, start: str, end: str, refresh: bool) -> pd.DataFrame | None:
@@ -125,7 +163,9 @@ def _num(v):
         return None
 
 
-def _load_universe(max_stocks: int, refresh: bool, pool: str = "lowprice") -> tuple[dict, dict]:
+def _load_universe(max_stocks: int, refresh: bool, pool: str = "lowprice",
+                   use_industry: bool = False,
+                   lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, dict]:
     """初筛候选 + 行业 + 历史K线。返回 (hists, meta)。
     pool="lowprice"：与 app.screen_impl 一致的小资金低价池（默认，可比历史结果）
     pool="all"    ：全 A（含创业板/科创板），只保留流动性约束，去掉低价小盘偏好
@@ -164,10 +204,13 @@ def _load_universe(max_stocks: int, refresh: bool, pool: str = "lowprice") -> tu
     codes = cands["代码"].tolist()
     print(f"初筛候选 {len(codes)} 只（{tag}），开始下载/读取历史K线……")
     end_d = dt.date.today()
-    start_d = end_d - dt.timedelta(days=LOOKBACK_DAYS)
-    # 行业映射：离线验证不额外抓（东财逐股接口慢且易卡），统一退回全截面百分位，
-    # 不影响因子 IC 的方向与显著性判断；实盘链路里仍按真实行业中性化。
+    start_d = end_d - dt.timedelta(days=lookback_days)
+    # 行业映射：默认不联网（东财逐股接口慢），统一退回全截面百分位；
+    # use_industry=True 时用 Baostock 全市场行业表（一次查询）
     ind_map: dict = {}
+    if use_industry:
+        ind_map = _industry_map(codes)
+        print(f"行业映射覆盖 {len(ind_map)}/{len(codes)} 只")
 
     def one(cd):
         return cd, _download(cd, start_d.strftime("%Y%m%d"), end_d.strftime("%Y%m%d"), refresh)
@@ -491,9 +534,10 @@ def _sim_hold(test_dates, scores, bar_idx, top_n=TOP_N, min_hold=MIN_HOLD,
 def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
         rebal: int = REBAL, rule: str = "fixed", min_hold: int = MIN_HOLD,
         max_hold: int = MAX_HOLD, exit_rank: int = EXIT_RANK, pool: str = "lowprice",
-        ml: bool = False, ml_weight: float = 0.20):
+        ml: bool = False, ml_weight: float = 0.20,
+        use_industry: bool = False, lookback_days: int = LOOKBACK_DAYS):
     ml_weight = max(0.0, min(0.5, float(ml_weight)))
-    hists, meta = _load_universe(max_stocks, refresh, pool)
+    hists, meta = _load_universe(max_stocks, refresh, pool, use_industry, lookback_days)
     if len(hists) < 30:
         print("可用股票不足 30 只，终止。")
         return
@@ -508,7 +552,8 @@ def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
     bar_idx = bars.set_index(["日期", "代码"]).sort_index()
     dates = sorted(npanel["日期"].unique())
     n_win = max(0, (len(dates) - TRAIN) // STEP)
-    print(f"交易日 {len(dates)} 天，可滚动 {n_win} 期（训练{TRAIN}/测试{TEST}，规则 {rule}）")
+    print(f"交易日 {len(dates)} 天，可滚动 {n_win} 期（训练{TRAIN}/测试{TEST}，规则 {rule}，"
+          f"行业 {'开' if use_industry else '关'}）")
 
     rows, ic_rows = [], []
     for k in range(n_win):
@@ -637,13 +682,17 @@ def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
     tag = f"{rule}_t{rebal}" if rule == "fixed" else f"hold_{min_hold}_{max_hold}_{exit_rank}"
     if pool != "lowprice":
         tag += f"_{pool}"
+    if use_industry:
+        tag += "_ind"
     if ml:
         tag += f"_ml{round(ml_weight * 100)}"
-    ic_file = f"因子IC_样本外逐期_{tag}.csv" if ml else "因子IC_样本外逐期.csv"
-    res.to_csv(HERE / f"滚动样本外验证_{tag}.csv", index=False, encoding="utf-8-sig")
-    pd.DataFrame(ic_rows).to_csv(HERE / ic_file, index=False, encoding="utf-8-sig")
-    if not ml and rule == "fixed" and rebal == REBAL and pool == "lowprice" and n_fund == 0:
-        res.to_csv(HERE / "滚动样本外验证.csv", index=False, encoding="utf-8-sig")  # 默认口径保持旧文件名
+    ic_file = (f"因子IC_样本外逐期_{tag}.csv" if (ml or use_industry)
+               else "因子IC_样本外逐期.csv")
+    _safe_to_csv(res, HERE / f"滚动样本外验证_{tag}.csv")
+    _safe_to_csv(pd.DataFrame(ic_rows), HERE / ic_file)
+    if (not ml and rule == "fixed" and rebal == REBAL and pool == "lowprice"
+            and n_fund == 0 and not use_industry):
+        _safe_to_csv(res, HERE / "滚动样本外验证.csv")  # 默认口径保持旧文件名
 
     # ---------- 汇总 ----------
     print("\n" + "=" * 70)
@@ -707,7 +756,12 @@ if __name__ == "__main__":
                     help="lowprice=实盘同款低价主板池；all=全A扩池")
     ap.add_argument("--ml", action="store_true", help="增加LightGBM/XGBoost对照组，不覆盖原策略结果")
     ap.add_argument("--ml-weight", type=float, default=0.20, help="ML分占混合评分比例，默认0.20，上限0.50")
+    ap.add_argument("--industry", action="store_true",
+                    help="联网补齐行业映射（默认关闭，全部按未分类=全截面中性）")
+    ap.add_argument("--lookback", type=int, default=LOOKBACK_DAYS,
+                    help="回看自然日数，默认1150（约7期）；1350可跑8期以上")
     a = ap.parse_args()
     run(max_stocks=a.max, refresh=a.refresh, n_fund=a.fund, rebal=a.rebal,
         rule=a.rule, min_hold=a.min_hold, max_hold=a.max_hold,
-        exit_rank=a.exit_rank, pool=a.pool, ml=a.ml, ml_weight=a.ml_weight)
+        exit_rank=a.exit_rank, pool=a.pool, ml=a.ml, ml_weight=a.ml_weight,
+        use_industry=a.industry, lookback_days=a.lookback)
