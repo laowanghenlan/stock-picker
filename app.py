@@ -695,7 +695,7 @@ def review_conclusion(rv: pd.DataFrame) -> str:
         text += f" 止损纪律避免了约 {saved:.0f} 元额外亏损。"
     return text
 
-APP_VERSION = "v1.22"       # v1.22 复盘逐笔金额/股数与盈亏汇总；LightGBM/XGBoost样本外门控加分
+APP_VERSION = "v1.22.1"     # v1.22.1 本金输入去掉上下限，可自由输入任意金额
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 st.title("📈 每日选股")
@@ -729,11 +729,14 @@ with st.expander("💼 持仓体检（自动读持仓.csv，选股时自动执�
 
 # ---------------- 侧边栏：只保留本金输入（行情/复盘/因子/熔断全部自动） ----------------
 with st.sidebar:
-    capital = st.number_input("💰 本金（元）", min_value=1000, max_value=100000,
-                              value=int(load_settings()["capital"]), step=100,
-                              help="本次修改仅当前页面生效；永久修改请到 GitHub 仓库编辑 推荐设置.json")
+    # 本金不设上下限：想投多少就输多少，只要求大于0（后面要用它算仓位和股价上限）
+    capital = st.number_input("💰 本金（元）", min_value=1.0, max_value=None,
+                              value=float(load_settings()["capital"]), step=100.0,
+                              format="%.0f",
+                              help="可自由输入任意金额，本次修改仅当前页面生效；"
+                                   "想改每日邮件推送的默认本金，请编辑仓库里的 推荐设置.json")
     n_picks = auto_pick_count(capital)
-    st.caption(f"只数由本金+预期收益自动计算（约 {n_picks} 只起，单笔≥1000元）")
+    st.caption(f"只数由本金+预期收益自动计算（当前约 {n_picks} 只起）")
     st.caption(f"行情快照时间：{spot_cache_time()}")
 
 # 股价上限：保证各只买100股也买得起；本金越大上限越宽，最高20元（保持低价股策略）
