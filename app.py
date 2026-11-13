@@ -1047,7 +1047,7 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
                     res["ML分"] = res["代码"].astype(str).map(ml["scores"])
         except Exception as _e:
             res.attrs["ml"] = {"error": str(_e)[:80]}
-    # 基础权重（历史IC）
+    # 基础权重（历史IC；因子截断按 |IC|）
     base_icw = factors.ic_weights(res.attrs.get("ic") or {})
 
     # ========== 复盘反哺权重：用实盘盈亏融合历史IC（比例根据实笔数动态调整） ==========

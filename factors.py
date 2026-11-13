@@ -201,7 +201,8 @@ def cap_weights(w: dict, n: int | None = None) -> dict:
 def ic_weights(ic: dict, keep: set | None = None) -> dict:
     """|IC|<门槛剔除；剩余按 |IC| 归一化，保留符号（负IC=反转因子）。
     keep: 相关性去冗余后允许保留的因子集合（None=不剔除）。
-    最后按 |权重| 截断到 MAX_FACTORS 个，避免弱因子噪声稀释信号。"""
+    最后截断到 MAX_FACTORS 个，避免弱因子噪声稀释信号。
+    注：曾试过按 ICIR 排序选因子，样本外未通过（见 validate 记录），故仍按 |IC|。"""
     valid = {f: v for f, v in ic.items() if abs(v) >= IC_MIN}
     if keep is not None:
         valid = {f: v for f, v in valid.items() if f in keep}

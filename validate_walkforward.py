@@ -348,12 +348,44 @@ def _composite_ic(npanel: pd.DataFrame, dates: list, weights: dict) -> float:
     return float(np.mean(vals)) if vals else float("nan")
 
 
+def _ic_series(npanel: pd.DataFrame, dates: list, col: str) -> list[float]:
+    """指定日期区间内，某因子每日横截面 IC 序列（用于计算 ICIR=均值/标准差）。"""
+    g = npanel[npanel["日期"].isin(dates)]
+    vals = []
+    for _, day in g.groupby("日期"):
+        sub = day[[col, "未来5日收益"]].dropna()
+        if len(sub) < factors.MIN_XSEC:
+            continue
+        c = sub[col].rank().corr(sub["未来5日收益"].rank())
+        if c == c:
+            vals.append(float(c))
+    return vals
+
+
 def _period_ic(npanel: pd.DataFrame, dates: list, factors_use: list[str]) -> dict:
     out = {}
     for f in factors_use:
         col = f + "_n"
         if col in npanel.columns:
             out[f] = _ic_of(npanel, dates, col)
+    return out
+
+
+def _period_icir(npanel: pd.DataFrame, dates: list, factors_use: list[str]) -> dict:
+    """各因子训练期 ICIR = mean(daily IC) / std(daily IC)，衡量方向稳定性。
+    标准差为 0 或 NaN 时 ICIR 记 0（不可靠）。"""
+    out = {}
+    for f in factors_use:
+        col = f + "_n"
+        if col not in npanel.columns:
+            continue
+        vals = _ic_series(npanel, dates, col)
+        if not vals:
+            continue
+        arr = np.array(vals, dtype=float)
+        sd = float(arr.std())
+        mean = float(arr.mean())
+        out[f] = (mean / sd) if sd and sd > 0 and not np.isnan(sd) else 0.0
     return out
 
 
@@ -609,8 +641,9 @@ def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
         if len(test_dates) < TEST:
             break
 
-        # ---------- 训练：逐因子IC → 去冗余 → 定权 ----------
+        # ---------- 训练：逐因子IC → 去冗余 → 定权（ICIR仅作诊断，不参与选股） ----------
         ic_tr = _period_ic(npanel, train_lbl, factors.ALL_FACTOR_COLS)
+        icir_tr = _period_icir(npanel, train_lbl, factors.ALL_FACTOR_COLS)
         keep = factors.prune_correlated(npanel[npanel["日期"].isin(train_lbl)], ic_tr)
         w = factors.ic_weights(ic_tr, keep=keep)
         if not w:
@@ -701,8 +734,11 @@ def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
             "跌停顺延": sdelay,
         })
         for f, v in ic_tr.items():
-            ic_rows.append({"期数": k + 1, "因子": f, "训练IC": round(v, 4) if v == v else None,
-                            "入选": f in w, "测试IC": round(ic_te.get(f, np.nan), 4)
+            ic_rows.append({"期数": k + 1, "因子": f,
+                            "训练IC": round(v, 4) if v == v else None,
+                            "训练ICIR": round(icir_tr.get(f, 0.0), 4),
+                            "入选": f in w,
+                            "测试IC": round(ic_te.get(f, np.nan), 4)
                             if ic_te.get(f, np.nan) == ic_te.get(f, np.nan) else None})
         if ml:
             ml_oof = ml_meta.get("oof_ic", float("nan"))
