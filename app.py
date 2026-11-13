@@ -150,29 +150,11 @@ def send_email_with_results(plan, mined, capital, leftover, cold, idx_close, idx
             d["exp_loss"] = sum(x["预计亏损"] for x in pts)
             d["exp_pnl"] = sum(x["盈利概率"] / 100 * x["预计盈利"]
                                + (1 - x["盈利概率"] / 100) * x["预计亏损"] for x in pts)
-        # 复盘摘要：复用 app 的复盘逻辑，失败不影响发邮件
+        # 复盘摘要：统一调 daily_push.build_review，与定时邮件完全同口径
         try:
             rv = review_impl()
-            d["last"] = daily_push.build_last_batch(rv)      # 上一次推送现在赚了还是亏了
-            if rv is not None and len(rv) > 0:
-                done = rv[rv["_done"]]
-                if len(done) > 0:
-                    wins = int(done["结果"].isin(["🎯止盈", "🏁到期盈利"]).sum())
-                    r = {"done": int(len(done)), "winrate": float(wins / len(done) * 100),
-                         "pnl": float(rv["_盈亏额"].sum()), "bench": None, "excess": None,
-                         "rows": [], "conclusion": ""}
-                    if "同期沪深300%" in done.columns:
-                        d2 = done.dropna(subset=["同期沪深300%"])
-                        if len(d2) > 0:
-                            r["bench"] = float(d2["同期沪深300%"].mean())
-                            r["excess"] = float((d2["盈亏%"] - d2["同期沪深300%"]).mean())
-                    for _, r2 in rv.head(5).iterrows():
-                        r["rows"].append({"日期": str(r2["日期"]), "名称": r2["名称"],
-                                          "推荐价": float(r2["推荐价"]), "现价": float(r2["现价"]),
-                                          "结果": r2["结果"], "盈亏%": float(r2["盈亏%"]),
-                                          "盈亏额": float(r2["_盈亏额"])})
-                    r["conclusion"] = review_conclusion(rv)
-                    d["review"] = r
+            d["last"] = daily_push.build_last_batch(rv)
+            d["review"] = daily_push.build_review(rv)
         except Exception:
             pass
         # 留档供周末复盘（与 daily_push._collect 相同的记录格式）
