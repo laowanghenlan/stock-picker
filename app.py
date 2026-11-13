@@ -375,6 +375,9 @@ CANDIDATES = int(_cfg_pool.get("网页端", CANDIDATES))
 CANDIDATES_PUSH = int(_cfg_pool.get("邮件推送", CANDIDATES))
 
 _risk = _cfg().get("风控", {})
+_ml_cfg = _cfg().get("机器学习", {})
+ML_ENABLED = bool(_ml_cfg.get("启用", True))            # LightGBM加分项总开关
+ML_WEIGHT = max(0.0, min(0.5, float(_ml_cfg.get("权重", 0.20))))   # 占总分比例，上限50%
 STOP_LOSS_PCT = float(_risk.get("止损%", 0.05))
 TAKE_PROFIT_PCT = float(_risk.get("止盈%", 0.10))
 STOP_LOSS_PCT = STOP_LOSS_PCT  # 用 config 的覆盖
@@ -409,7 +412,7 @@ def _confidence(n_done: int, threshold: int) -> float:
 REVIEW_FILE = Path(__file__).parent / "推送记录.csv"   # GitHub Actions 每日推送留档
 REVIEW_N = 10            # 默认复盘最近10个推送批次（按日期+推送时间整批保留，不切断批次）
 REVIEW_DAYS = 20         # 推荐后最长跟踪20个交易日（与策略持有期一致），触发止盈/止损即出结果
-REVIEW_CACHE_KEY = "v1.18.5"   # 改这里（或随版本号）可强制让复盘缓存失效，避免读到旧的错误结果
+REVIEW_CACHE_KEY = "v1.22"   # 版本升级强制刷新，避免旧缓存缺少股数/盈亏额等新字段
 
 
 def _run_with_timeout(fn, *args, timeout=8, **kwargs):
@@ -641,8 +644,10 @@ def review_impl(_key: str = "") -> pd.DataFrame:
                "代码": code,
                "名称": str(r.get("名称", "")).strip(),
                "推荐价": round(price0, 2), "现价": round(judge_px, 2),
+               "股数": shares,
                "盈亏%": round((judge_px / base_px - 1) * 100, 2), "结果": label,
                "同期沪深300%": bench,
+               "盈亏额": round((judge_px - base_px) * shares, 1),
                "_盈亏额": round((judge_px - base_px) * shares, 1),
                "_done": not label.startswith("⏳"), "_saved": 0.0}
         # 止损挽回金额：若止损后继续跌到满期，估算纪律避免了多少额外亏损
@@ -690,7 +695,7 @@ def review_conclusion(rv: pd.DataFrame) -> str:
         text += f" 止损纪律避免了约 {saved:.0f} 元额外亏损。"
     return text
 
-APP_VERSION = "v1.21"       # v1.21 腾讯前复权日K兜底+东财熔断；巨潮公告排雷；Tushare Pro可选增强
+APP_VERSION = "v1.22"       # v1.22 复盘逐笔金额/股数与盈亏汇总；LightGBM/XGBoost样本外门控加分
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 st.title("📈 每日选股")
@@ -965,6 +970,22 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
             pass
     except Exception:
         res.attrs["ic"], res.attrs["icir"], res.attrs["ic_n"] = {}, {}, 0
+    # ========== L2 机器学习加分项：LightGBM/XGBoost；样本外IC不达标则只记录、不打分 ==========
+    res.attrs["ml"] = None
+    if ML_ENABLED and len(res) and "npanel" in locals() and len(npanel):
+        try:
+            import ml_model
+            today = res[["代码", "行业"]].copy()
+            for f in factors.ALL_FACTOR_COLS:
+                if f in res.columns:
+                    today[f + "_n"] = factors.neutral_score(res[f], res["行业"]) - 0.5
+            ml = ml_model.train_predict(npanel, today)
+            if ml:
+                res.attrs["ml"] = {k: v for k, v in ml.items() if k != "scores"}
+                if ml["oof_pass"]:
+                    res["ML分"] = res["代码"].astype(str).map(ml["scores"])
+        except Exception as _e:
+            res.attrs["ml"] = {"error": str(_e)[:80]}
     # 基础权重（历史IC）
     base_icw = factors.ic_weights(res.attrs.get("ic") or {})
 
@@ -1041,6 +1062,9 @@ def pick_top3(res: pd.DataFrame, n: int = PICKS) -> pd.DataFrame:
             res[f"因子_{c}_贡献"] = contribs[f"因子_{c}_贡献"]
         fscore = sum(contribs.values())
         res["总分"] = res["总分"] * 0.6 + fscore * 0.4
+    # L2 机器学习加分：ML分为当日截面百分位(0~1)，缺失按中位数0.5处理；未通过样本外IC则无此列
+    if ML_WEIGHT > 0 and "ML分" in res.columns and res["ML分"].notna().any():
+        res["总分"] = (1 - ML_WEIGHT) * res["总分"] + ML_WEIGHT * res["ML分"].fillna(0.5) * 100
     res = res.sort_values("总分", ascending=False)
     # 只保留扣费后还能赚钱、且近7天无利空新闻的股票
     res = res[(res["扣费总收益"] > 0) & (~res["有雷"])]
@@ -1183,8 +1207,9 @@ with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}批）", expanded=F
             st.caption("暂无历史推荐，有推荐后会自动复盘。")
         else:
             done = rv[rv["_done"]]
+            holding = rv[~rv["_done"]]
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("推荐总数", f"{len(rv)} 条")
+            m1.metric("推荐总数", f"{len(rv)} 条 / {rv['_batch'].nunique()} 批")
             if len(done) > 0:
                 wins = int(done["结果"].isin(["🎯止盈", "🏁到期盈利"]).sum())
                 m2.metric("胜率", f"{wins / len(done) * 100:.0f}%（{wins}/{len(done)}）")
@@ -1194,8 +1219,19 @@ with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}批）", expanded=F
                 m2.metric("胜率", "—")
                 m3.metric("平均每笔盈亏", "—")
                 m4.metric("累计盈亏", "—")
-            _cols = ["名称", "推荐价", "现价", "盈亏%", "同期沪深300%", "结果"]
+            # 第二行：赚钱和亏钱各多少笔、各多少元（用户最关心的绝对金额）
+            _win, _loss = done[done["盈亏额"] > 0], done[done["盈亏额"] < 0]
+            n1, n2, n3, n4 = st.columns(4)
+            n1.metric("盈利笔数", f"{len(_win)} 笔")
+            n2.metric("盈利金额", f"+{_win['盈亏额'].sum():.0f} 元")
+            n3.metric("亏损笔数", f"{len(_loss)} 笔")
+            n4.metric("亏损金额", f"{_loss['盈亏额'].sum():.0f} 元")
+            st.caption(f"持有中 {len(holding)} 只，浮动盈亏 {holding['盈亏额'].sum():+.0f} 元"
+                       f"（未计入胜率与累计盈亏）；平均每批推荐 "
+                       f"{len(rv) / max(1, rv['_batch'].nunique()):.1f} 只")
+            _cols = ["名称", "推荐价", "现价", "股数", "盈亏%", "盈亏额", "同期沪深300%", "结果"]
             _col_fmt = {"盈亏%": st.column_config.NumberColumn(format="%+.2f%%"),
+                        "盈亏额": st.column_config.NumberColumn(format="%+.0f 元"),
                         "同期沪深300%": st.column_config.NumberColumn(format="%+.2f%%")}
             # 按推送批次（日期+时间）分组显示，批次之间用红色横线隔开
             for i, (_, g) in enumerate(rv.groupby("_batch", sort=False)):
@@ -1204,7 +1240,7 @@ with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}批）", expanded=F
                                 unsafe_allow_html=True)
                 _day, _tm = g["日期"].iloc[0], g["推送时间"].iloc[0]
                 _when = f"{_day} {_tm}" if _tm else _day
-                st.markdown(f"**📅 {_when} 推送 · {len(g)} 只**")
+                st.markdown(f"**📅 {_when} 推送 · {len(g)} 只 · 本批盈亏 {g['盈亏额'].sum():+.0f} 元**")
                 st.dataframe(g[_cols], width="stretch", hide_index=True, column_config=_col_fmt)
             st.info("💡 " + review_conclusion(rv))
             if len(done) < 30:
@@ -1308,6 +1344,19 @@ if run:
         st.caption(f"⛔ 衰减预警：{decayed_set}连续≥30天|IC|<{0.03}，已临时剔除，IC恢复自动归队。")
     if _icn and _icn < 60:
         st.caption(f"⚠️ 因子检验仅有 {_icn} 个交易日截面（<60），权重置信度偏低，仅供方向参考。")
+
+    # ===== 机器学习加分项状态（LightGBM/XGBoost）=====
+    _ml = res.attrs.get("ml")
+    if _ml:
+        if _ml.get("error"):
+            st.caption(f"🤖 机器学习未启用：{_ml['error']}")
+        else:
+            _ic_txt = f"{_ml['oof_ic']:+.3f}" if _ml.get("oof_ic") == _ml.get("oof_ic") else "无效"
+            _imp = "、".join(str(k).replace("_n", "") for k, _ in _ml.get("importance", [])[:3])
+            st.caption(f"🤖 机器学习（{_ml.get('backend')}）：样本外IC {_ic_txt}"
+                       f"（{'达标' if _ml.get('oof_pass') else '未达标，不参与打分'}），"
+                       f"训练 {_ml.get('n_rows')} 样本 / {_ml.get('n_dates')} 日，"
+                       f"占总分 {ML_WEIGHT:.0%}；模型最看重：{_imp}")
 
     # ===== 策略熔断状态 =====
     cb_level = int(res.attrs.get("cb_level", 0) or 0)

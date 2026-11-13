@@ -84,7 +84,7 @@ LOG_FILE = Path(__file__).parent / "推送记录.csv"       # 推送留档，供
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.21"
+APP_VERSION = "v1.22"
 
 
 def _mark_sent_today() -> None:
@@ -154,10 +154,18 @@ def build_review(rv: pd.DataFrame) -> dict | None:
     if len(done) == 0:
         return None
     wins = int(done["结果"].isin(["🎯止盈", "🏁到期盈利"]).sum())
+    _win, _loss = done[done["_盈亏额"] > 0], done[done["_盈亏额"] < 0]
+    _hold = rv[~rv["_done"]]
+    _nb = int(rv["_batch"].nunique()) if "_batch" in rv.columns else 0
     r = {
         "done": int(len(done)),
         "winrate": float(wins / len(done) * 100),
-        "pnl": float(rv["_盈亏额"].sum()),
+        "pnl": float(done["_盈亏额"].sum()),
+        "win_n": int(len(_win)), "win_amt": float(_win["_盈亏额"].sum()),
+        "loss_n": int(len(_loss)), "loss_amt": float(_loss["_盈亏额"].sum()),
+        "holding": int(len(_hold)), "holding_pnl": float(_hold["_盈亏额"].sum()),
+        "total": int(len(rv)), "batches": _nb,
+        "avg_per_batch": float(len(rv) / _nb) if _nb else 0.0,
         "bench": None,
         "excess": None,
         "rows": [],
@@ -172,6 +180,7 @@ def build_review(rv: pd.DataFrame) -> dict | None:
         r["rows"].append({
             "日期": str(r2["日期"]), "名称": r2["名称"],
             "推荐价": float(r2["推荐价"]), "现价": float(r2["现价"]),
+            "股数": int(float(r2.get("股数", 0) or 0)),
             "结果": r2["结果"], "盈亏%": float(r2["盈亏%"]),
             "盈亏额": float(r2["_盈亏额"]),
         })
@@ -197,6 +206,7 @@ def build_last_batch(rv: pd.DataFrame) -> dict | None:
     if tms:                                  # 同一天推送多批，取最晚那批
         g = g[g["推送时间"] == tms[-1]]
     rows = [{"名称": str(x["名称"]), "推荐价": float(x["推荐价"]), "现价": float(x["现价"]),
+             "股数": int(float(x.get("股数", 0) or 0)),
              "盈亏%": float(x["盈亏%"]), "盈亏额": float(x["_盈亏额"]), "结果": str(x["结果"])}
             for _, x in g.iterrows()]
     return {"date": day, "time": tms[-1] if tms else "", "rows": rows,
@@ -306,7 +316,7 @@ def _last_text_lines(lb: dict) -> list:
     _when = f"{lb['date']} {lb['time']}" if lb["time"] else lb["date"]
     out = ["", f"【上一次推送 {_when} · {len(lb['rows'])} 只】现在怎么样："]
     for x in lb["rows"]:
-        out.append(f"  {x['名称']} 推荐 {x['推荐价']:.2f} → 现价 {x['现价']:.2f}  "
+        out.append(f"  {x['名称']} {x['股数']} 股 | 推荐 {x['推荐价']:.2f} → 现价 {x['现价']:.2f}  "
                    f"{x['盈亏%']:+.1f}%（{x['盈亏额']:+.0f} 元）  {x['结果']}")
     out.append(f"  合计 {lb['pnl']:+.0f} 元（盈利 {lb['wins']} 只 / 亏损 {lb['losses']} 只）")
     return out
@@ -372,11 +382,15 @@ def _render_text(d: dict) -> str:
     if r:
         lines += ["", "【复盘】最近推荐表现（自动统计，无需打开网页）",
                   f"已出结果 {r['done']} 笔 | 胜率 {r['winrate']:.0f}% | "
-                  f"累计盈亏 {r['pnl']:+.0f} 元"]
+                  f"累计盈亏 {r['pnl']:+.0f} 元",
+                  f"盈利 {r['win_n']} 笔 {r['win_amt']:+.0f} 元 | "
+                  f"亏损 {r['loss_n']} 笔 {r['loss_amt']:+.0f} 元",
+                  f"共 {r['total']} 条 / {r['batches']} 批，平均每批 {r['avg_per_batch']:.1f} 只 | "
+                  f"持有中 {r['holding']} 只，浮动 {r['holding_pnl']:+.0f} 元"]
         if r["bench"] is not None:
             lines.append(f"同期沪深300平均 {r['bench']:+.1f}% | 平均超额 {r['excess']:+.1f}%")
         for x in r["rows"]:
-            lines.append(f"  {x['日期']} {x['名称']} 推荐价 {x['推荐价']:.2f} → 现价 {x['现价']:.2f} "
+            lines.append(f"  {x['日期']} {x['名称']} {x['股数']} 股 | 推荐价 {x['推荐价']:.2f} → 现价 {x['现价']:.2f} "
                          f"{x['结果']} {x['盈亏%']:+.1f}%（{x['盈亏额']:+.0f} 元）")
         lines.append("结论：" + r["conclusion"])
 
@@ -411,7 +425,8 @@ def _last_html(lb: dict) -> str:
          "<td align=\"right\" style=\"border-bottom:1px solid #eef1f4;\">盈亏</td></tr>"]
     for x in lb["rows"]:
         c = "#d93025" if x["盈亏%"] >= 0 else "#1a7f37"
-        h.append(f"<tr><td style=\"padding:7px 0;border-bottom:1px solid #f4f6f9;\">{x['名称']}</td>"
+        h.append(f"<tr><td style=\"padding:7px 0;border-bottom:1px solid #f4f6f9;\">{x['名称']}"
+                 f"<br><span style=\"font-size:11px;color:#8b949e;\">{x['股数']} 股</span></td>"
                  f"<td align=\"right\" style=\"border-bottom:1px solid #f4f6f9;\">"
                  f"{x['推荐价']:.2f}→{x['现价']:.2f}</td>"
                  f"<td align=\"right\" style=\"border-bottom:1px solid #f4f6f9;color:{c};\">"
@@ -580,6 +595,15 @@ def _render_html(d: dict) -> str:
                      f"<div style=\"font-size:16px;font-weight:700;color:{color};margin-top:3px;\">"
                      f"{val}</div></td>")
         h.append("</tr></table>")
+        h.append(
+            f"<div style=\"font-size:12.5px;color:#57606a;text-align:center;margin-bottom:6px;\">"
+            f"盈利 {r['win_n']} 笔 <span style=\"color:#d93025;font-weight:700;\">"
+            f"{r['win_amt']:+.0f} 元</span> ｜ 亏损 {r['loss_n']} 笔 "
+            f"<span style=\"color:#1a7f37;font-weight:700;\">{r['loss_amt']:+.0f} 元</span></div>")
+        h.append(
+            f"<div style=\"font-size:11.5px;color:#8b949e;text-align:center;margin-bottom:10px;\">"
+            f"共 {r['total']} 条 / {r['batches']} 批，平均每批 {r['avg_per_batch']:.1f} 只 ｜ "
+            f"持有中 {r['holding']} 只，浮动 {r['holding_pnl']:+.0f} 元（未计入胜率）</div>")
         if r["bench"] is not None:
             h.append(f"<div style=\"font-size:12.5px;color:#8b949e;text-align:center;margin-bottom:12px;\">"
                      f"同期沪深300平均 {r['bench']:+.1f}% · 平均超额 {r['excess']:+.1f}%</div>")
@@ -595,7 +619,8 @@ def _render_html(d: dict) -> str:
             for x in r["rows"]:
                 c = "#d93025" if x["盈亏%"] >= 0 else "#1a7f37"      # A股：红涨绿跌
                 h.append(f"<tr><td style=\"padding:7px 0;border-bottom:1px solid #f4f6f9;\">{x['日期']}</td>"
-                         f"<td style=\"border-bottom:1px solid #f4f6f9;\">{x['名称']}</td>"
+                         f"<td style=\"border-bottom:1px solid #f4f6f9;\">{x['名称']}"
+                         f"<br><span style=\"font-size:11px;color:#8b949e;\">{x['股数']} 股</span></td>"
                          f"<td align=\"right\" style=\"border-bottom:1px solid #f4f6f9;\">"
                          f"{x['推荐价']:.2f}→{x['现价']:.2f}</td>"
                          f"<td align=\"right\" style=\"border-bottom:1px solid #f4f6f9;\">{x['结果']}</td>"

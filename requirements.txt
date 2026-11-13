@@ -6,5 +6,7 @@ plotly==7.1.0
 numpy==2.5.4
 requests==2.34.2
 baostock==0.9.4
+lightgbm==4.6.0
+# lightgbm 为机器学习加分项（ml_model.py）；云端装不上时 available() 返回 None，自动跳过不影响选股
 # 注：PyPortfolioOpt/cvxpy 已从依赖移除（Streamlit Cloud 安装失败拖垮部署）。
 # portfolio_optimizer.py 为可选导入，未装时自动用 numpy max_sharpe 闭式解，功能不受影响。

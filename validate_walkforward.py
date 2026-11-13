@@ -21,6 +21,7 @@
     python validate_walkforward.py --pool all --max 200  # 扩池到全 A（去掉低价小盘偏好）
     python validate_walkforward.py --fund 20             # 额外抓 20 只的 Baostock 财报，验证财务因子
     python validate_walkforward.py --refresh             # 忽略本地缓存重新下载
+    python validate_walkforward.py --ml                  # 增加ML对照组，独立输出、不覆盖原结果
 
 输出：
     滚动样本外验证.csv      每期的组合/基准收益、超额、IC、换手、平均持有天数、涨跌停触发
@@ -286,6 +287,50 @@ def _score_series(npanel: pd.DataFrame, dates: list, w: dict) -> dict:
     return out
 
 
+def _score_dict_ic(npanel: pd.DataFrame, scores: dict, dates: list) -> float:
+    """逐日评分与未来5日收益的截面 Spearman IC。"""
+    vals = []
+    for d in dates:
+        s = scores.get(d)
+        if s is None:
+            continue
+        day = npanel[npanel["日期"] == d].set_index("代码")
+        sub = pd.DataFrame({"s": s, "r": day["未来5日收益"]}).dropna()
+        if len(sub) < factors.MIN_XSEC:
+            continue
+        ic = sub["s"].rank().corr(sub["r"].rank())
+        if ic == ic:
+            vals.append(float(ic))
+    return float(np.mean(vals)) if vals else float("nan")
+
+
+def _ml_score_series(npanel: pd.DataFrame, train_dates: list, test_dates: list,
+                     base_scores: dict, weight: float) -> tuple[dict | None, dict]:
+    """训练窗拟合一次并预测整个测试窗；训练验证不达标时返回 None，绝不用测试标签训练。"""
+    import ml_model
+
+    train = npanel[npanel["日期"].isin(train_dates)]
+    fitted = ml_model.fit_model(train)
+    if fitted is None:
+        return None, {"backend": ml_model.available(), "oof_ic": float("nan")}
+    meta = {k: v for k, v in fitted.items() if k != "_model"}
+    if not fitted["oof_pass"]:
+        return None, meta
+    out = {}
+    for d in test_dates:
+        day = npanel[npanel["日期"] == d]
+        if len(day) == 0:
+            out[d] = base_scores[d]
+            continue
+        codes = day["代码"].astype(str)
+        ml_s = pd.Series(ml_model.predict_scores(fitted, day).to_numpy(), index=codes)
+        base = base_scores[d].reindex(codes)
+        # 原因子分与ML分都转为当日截面百分位后再混合，避免量纲不一致
+        blend = (1 - weight) * base.rank(pct=True) + weight * ml_s.rank(pct=True)
+        out[d] = blend.sort_values(ascending=False)
+    return out, meta
+
+
 def _metrics(navs: list, gross_navs: list) -> dict:
     nav = navs[-1] if navs else 1.0
     gross = gross_navs[-1] if gross_navs else 1.0
@@ -445,7 +490,9 @@ def _sim_hold(test_dates, scores, bar_idx, top_n=TOP_N, min_hold=MIN_HOLD,
 
 def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
         rebal: int = REBAL, rule: str = "fixed", min_hold: int = MIN_HOLD,
-        max_hold: int = MAX_HOLD, exit_rank: int = EXIT_RANK, pool: str = "lowprice"):
+        max_hold: int = MAX_HOLD, exit_rank: int = EXIT_RANK, pool: str = "lowprice",
+        ml: bool = False, ml_weight: float = 0.20):
+    ml_weight = max(0.0, min(0.5, float(ml_weight)))
     hists, meta = _load_universe(max_stocks, refresh, pool)
     if len(hists) < 30:
         print("可用股票不足 30 只，终止。")
@@ -487,6 +534,10 @@ def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
             continue
 
         scores = _score_series(npanel, test_dates, w)
+        ml_scores, ml_meta = None, {}
+        if ml:
+            ml_scores, ml_meta = _ml_score_series(npanel, train_lbl, test_dates, scores, ml_weight)
+
         # ---------- 测试：含涨跌停/滑点/费用 ----------
         if rule == "hold":
             navs, bskip, sdelay, turn, avg_hold = _sim_hold(
@@ -500,11 +551,27 @@ def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
             m = _metrics(navs, gnavs)
             avg_hold = float(rebal)
 
+        ml_m, ml_turn, ml_avg_hold = None, None, None
+        if ml_scores is not None:
+            if rule == "hold":
+                mnavs, mbskip, msdelay, ml_turn, ml_avg_hold = _sim_hold(
+                    test_dates, ml_scores, bar_idx, TOP_N, min_hold, max_hold, exit_rank, cost=True)
+                mgnavs, *_ = _sim_hold(
+                    test_dates, ml_scores, bar_idx, TOP_N, min_hold, max_hold, exit_rank, cost=False)
+            else:
+                mnavs, mbskip, msdelay, ml_turn = _sim_fixed(
+                    test_dates, ml_scores, bar_idx, TOP_N, rebal, cost=True)
+                mgnavs, *_ = _sim_fixed(
+                    test_dates, ml_scores, bar_idx, TOP_N, rebal, cost=False)
+                ml_avg_hold = float(rebal)
+            ml_m = _metrics(mnavs, mgnavs)
+
         # ---------- 本期统计 ----------
         test_lbl = test_dates[:-FWD]
         ic_te = _period_ic(npanel, test_lbl, list(w.keys()))
         ic_test = _composite_ic(npanel, test_lbl, w)
         ic_train = _composite_ic(npanel, train_lbl, w)
+        ic_ml = _score_dict_ic(npanel, ml_scores, test_lbl) if ml_scores is not None else float("nan")
         if ic_test != ic_test:
             ic_test = 0.0
         if ic_train != ic_train:
@@ -544,16 +611,38 @@ def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
             ic_rows.append({"期数": k + 1, "因子": f, "训练IC": round(v, 4) if v == v else None,
                             "入选": f in w, "测试IC": round(ic_te.get(f, np.nan), 4)
                             if ic_te.get(f, np.nan) == ic_te.get(f, np.nan) else None})
-        print(f"  第{k + 1}期 {rows[-1]['测试区间']}：组合 {m['net']:+.2%} / 基准 {bench:+.2%} / "
-              f"测试IC {ic_test:+.3f} / 换手 {turn} 次 / 持有 {avg_hold:.0f} 天")
+        if ml:
+            ml_oof = ml_meta.get("oof_ic", float("nan"))
+            rows[-1].update({
+                "ML后端": ml_meta.get("backend") or "无",
+                "ML训练验证IC": round(ml_oof, 4) if ml_oof == ml_oof else None,
+                "ML参与打分": ml_scores is not None,
+                "ML测试IC": round(ic_ml, 4) if ic_ml == ic_ml else None,
+                "ML毛收益%": round(ml_m["gross"] * 100, 2) if ml_m else None,
+                "ML组合收益%": round(ml_m["net"] * 100, 2) if ml_m else None,
+                "ML成本拖累%": round((ml_m["gross"] - ml_m["net"]) * 100, 2) if ml_m else None,
+                "ML超额%": round((ml_m["net"] - bench_mean) * 100, 2) if ml_m else None,
+                "ML最大回撤%": round(ml_m["mdd"] * 100, 2) if ml_m else None,
+                "ML换手次数": ml_turn,
+                "ML平均持有天数": round(ml_avg_hold, 1) if ml_avg_hold is not None else None,
+            })
+        line = (f"  第{k + 1}期 {rows[-1]['测试区间']}：组合 {m['net']:+.2%} / 基准 {bench:+.2%} / "
+                f"测试IC {ic_test:+.3f} / 换手 {turn} 次 / 持有 {avg_hold:.0f} 天")
+        if ml:
+            line += (f" / ML {ml_m['net']:+.2%}、IC {ic_ml:+.3f}" if ml_m
+                     else f" / ML未参与（训练验证IC {ml_meta.get('oof_ic', float('nan')):+.3f}）")
+        print(line)
 
     res = pd.DataFrame(rows)
     tag = f"{rule}_t{rebal}" if rule == "fixed" else f"hold_{min_hold}_{max_hold}_{exit_rank}"
     if pool != "lowprice":
         tag += f"_{pool}"
+    if ml:
+        tag += f"_ml{round(ml_weight * 100)}"
+    ic_file = f"因子IC_样本外逐期_{tag}.csv" if ml else "因子IC_样本外逐期.csv"
     res.to_csv(HERE / f"滚动样本外验证_{tag}.csv", index=False, encoding="utf-8-sig")
-    pd.DataFrame(ic_rows).to_csv(HERE / "因子IC_样本外逐期.csv", index=False, encoding="utf-8-sig")
-    if rule == "fixed" and rebal == REBAL and pool == "lowprice" and n_fund == 0:
+    pd.DataFrame(ic_rows).to_csv(HERE / ic_file, index=False, encoding="utf-8-sig")
+    if not ml and rule == "fixed" and rebal == REBAL and pool == "lowprice" and n_fund == 0:
         res.to_csv(HERE / "滚动样本外验证.csv", index=False, encoding="utf-8-sig")  # 默认口径保持旧文件名
 
     # ---------- 汇总 ----------
@@ -578,6 +667,20 @@ def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
           f"平均最大回撤 {res['最大回撤%'].mean():.2f}%")
     print(f"平均每期换手 {res['换手次数'].mean():.1f} 次 | 平均持有 {res['平均持有天数'].mean():.1f} 天")
     print(f"成交约束触发：涨停跳过 {int(res['涨停跳过'].sum())} 次，跌停顺延 {int(res['跌停顺延'].sum())} 次")
+    if ml:
+        participated = res["ML参与打分"].fillna(False) if "ML参与打分" in res.columns else pd.Series(dtype=bool)
+        mr = res[participated] if len(participated) else res.iloc[0:0]
+        if len(mr):
+            mics = pd.to_numeric(mr["ML测试IC"], errors="coerce").dropna()
+            ml_ic = float(mics.mean()) if len(mics) else float("nan")
+            ml_icir = float(mics.mean() / mics.std()) if len(mics) > 1 and mics.std() > 0 else 0.0
+            ml_cum = float(np.prod(1 + mr["ML组合收益%"] / 100) - 1)
+            base_same = float(np.prod(1 + mr["组合收益%"] / 100) - 1)
+            print(f"ML对照：参与 {len(mr)}/{len(res)} 期 | 测试IC均值 {ml_ic:+.4f} | ICIR {ml_icir:+.2f}")
+            print(f"ML扣费累计 {ml_cum:+.2%} | 同期原策略 {base_same:+.2%} | "
+                  f"ML平均超额 {mr['ML超额%'].mean():+.2f}% | ML平均最大回撤 {mr['ML最大回撤%'].mean():.2f}%")
+        else:
+            print("ML对照：所有期次均未通过训练窗样本外IC门槛，未参与打分。")
     stable = mean_ic > 0 and pos / len(res) >= 0.6 and icir >= 0.3
     if not stable:
         print("\n结论：样本外 IC 不稳定 ❌ 当前因子还不足以支撑机器学习排序模型，先别上 LightGBM")
@@ -586,7 +689,7 @@ def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
               "\n      优势被换手成本吃掉——应先拉长持有期/降低换手，再谈 LightGBM")
     else:
         print("\n结论：样本外 IC 稳定为正且扣费后仍有超额 ✅ 可以考虑 LightGBM 排序模型")
-    print(f"明细已写入 滚动样本外验证_{tag}.csv / 因子IC_样本外逐期.csv")
+    print(f"明细已写入 滚动样本外验证_{tag}.csv / {ic_file}")
 
 
 if __name__ == "__main__":
@@ -602,7 +705,9 @@ if __name__ == "__main__":
     ap.add_argument("--exit-rank", type=int, default=EXIT_RANK, help="hold 规则跌出前N名才卖")
     ap.add_argument("--pool", choices=["lowprice", "all"], default="lowprice",
                     help="lowprice=实盘同款低价主板池；all=全A扩池")
+    ap.add_argument("--ml", action="store_true", help="增加LightGBM/XGBoost对照组，不覆盖原策略结果")
+    ap.add_argument("--ml-weight", type=float, default=0.20, help="ML分占混合评分比例，默认0.20，上限0.50")
     a = ap.parse_args()
     run(max_stocks=a.max, refresh=a.refresh, n_fund=a.fund, rebal=a.rebal,
         rule=a.rule, min_hold=a.min_hold, max_hold=a.max_hold,
-        exit_rank=a.exit_rank, pool=a.pool)
+        exit_rank=a.exit_rank, pool=a.pool, ml=a.ml, ml_weight=a.ml_weight)

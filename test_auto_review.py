@@ -59,6 +59,11 @@ def run_app() -> AppTest:
     st.cache_data.clear()                      # 防止跨场景缓存污染
     at = AppTest.from_file(str(APP), default_timeout=60)
     at.run()
+    for b in at.button:
+        if "加载复盘数据" in b.label:
+            b.click()
+            at.run()
+            break
     assert len(at.exception) == 0, f"页面抛异常: {[e.value for e in at.exception]}"
     return at
 
@@ -71,10 +76,10 @@ def metric(at: AppTest, label: str) -> str:
 
 
 def review_table(at: AppTest) -> pd.DataFrame:
-    """页面上的 st.dataframe 里找出复盘明细表（含「结果」列的那张）"""
-    for d in at.dataframe:
-        if "结果" in d.value.columns:
-            return d.value
+    """合并各推送批次的复盘明细表（均含「结果」列）。"""
+    tables = [d.value for d in at.dataframe if "结果" in d.value.columns]
+    if tables:
+        return pd.concat(tables, ignore_index=True)
     raise AssertionError(f"找不到复盘明细表，现有: {[list(d.value.columns) for d in at.dataframe]}")
 
 
@@ -100,13 +105,19 @@ def scenario_b():
             round((4.20 / 4.00 - 1) * 100, 2), round((7.80 / 8.00 - 1) * 100, 2)]
     amounts = [round((9.40 - 10.00) * 100, 1), round((5.56 - 5.00) * 200, 1),
                round((4.20 - 4.00) * 100, 1), round((7.80 - 8.00) * 100, 1)]
-    assert metric(at, "推荐总数") == "5 条"
+    assert metric(at, "推荐总数") == "5 条 / 3 批"
     assert metric(at, "胜率") == "50%（2/4）", metric(at, "胜率")
     assert metric(at, "平均每笔盈亏") == f"{sum(pnls) / len(pnls):+.2f}%"
     assert metric(at, "累计盈亏") == f"{sum(amounts):+.0f} 元"
+    assert metric(at, "盈利笔数") == "2 笔"
+    assert metric(at, "盈利金额") == "+132 元"
+    assert metric(at, "亏损笔数") == "2 笔"
+    assert metric(at, "亏损金额") == "-80 元"
 
     tbl = review_table(at)
     assert len(tbl) == 5
+    assert {"股数", "盈亏额"}.issubset(tbl.columns)
+    assert set(tbl["盈亏额"]) == set(amounts + [0.0])
     got = set(tbl["结果"])
     want = {"🎯止盈", "🛑止损保命", "🏁到期盈利", "🏁到期亏损", "⏳持有中(当日新推)"}
     assert got == want, f"结果标签不符: {got}"
@@ -120,13 +131,12 @@ def scenario_b():
 
 def scenario_c():
     shutil.copy2(BAK, CSV)                     # 恢复真实推送记录
-    n_real = len(pd.read_csv(CSV))
     at = run_app()
-    assert metric(at, "推荐总数") == f"{n_real} 条"
+    tbl = review_table(at)
+    assert metric(at, "推荐总数").startswith(f"{len(tbl)} 条 / ")
     assert metric(at, "胜率") == "—"
     infos = [i.value for i in at.info]
     assert any("持有期" in t for t in infos), f"结论不符: {infos}"
-    tbl = review_table(at)
     assert set(tbl["结果"]) == {"⏳持有中(当日新推)"}
     print("场景C（真实推送记录）：通过 —— 打桩无后续行情，全部标 ⏳持有中，不计入胜率")
 
@@ -136,7 +146,8 @@ if __name__ == "__main__":
     CSV.unlink()
     try:
         with mock.patch.object(akshare, "stock_zh_a_hist", fake_hist), \
-             mock.patch.object(akshare, "index_zh_a_hist", fake_index):
+             mock.patch.object(akshare, "index_zh_a_hist", fake_index), \
+             mock.patch("requests.get", side_effect=RuntimeError("测试强制走东财假行情")):
             scenario_a()
             scenario_b()
             scenario_c()
