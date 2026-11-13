@@ -22,10 +22,6 @@ check("import ml_model", lambda: __import__("ml_model"))
 import app
 check("import app", lambda: None)
 
-# verify_impl 内部引用了模块顶层的 capital（Streamlit 页面的 number_input 变量）
-# 裸跑测试时注入一下默认值
-app.capital = 2200.0
-
 # ---------- 2. 数据加载 ----------
 print("\n② 行情拉取 ...")
 spot = app.get_spot_impl()

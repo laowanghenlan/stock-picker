@@ -63,7 +63,7 @@ from email.mime.text import MIMEText                            # noqa: E402
 
 import pandas as pd                                             # noqa: E402
 
-import app  # 复用 web 应用的选股逻辑；裸运行无 ScriptRunContext，一律调 *_impl 版本（绕开 st.cache_data）  # noqa: E402
+import screen_service as app  # 复用选股引擎（无 Streamlit 依赖）  # noqa: E402
 
 
 def _load_capital() -> float:
@@ -81,7 +81,7 @@ CAPITAL = _load_capital()                             # 本金（元），web �
 TO_ADDR = os.environ["QQ_EMAIL"]                        # 收件邮箱（与发件邮箱相同）
 AUTH_CODE = os.environ["QQ_AUTH_CODE"]                  # QQ邮箱SMTP授权码（存于GitHub Secrets）
 LOG_FILE = Path(__file__).parent / "推送记录.csv"       # 推送留档，供周末复盘用
-IC_GATE = 0.02                                        # 训练期组合IC低于此值则今日空仓（信号太弱）
+IC_GATE = app.IC_GATE                                 # 训练期组合IC低于此值则今日空仓（信号太弱）
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
