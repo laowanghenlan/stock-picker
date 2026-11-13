@@ -45,6 +45,9 @@ MIN_XSEC = 15        # 单个交易日截面至少15只股票才算IC
 MIN_IND = 3          # 同行业至少3只才做组内中性化，否则退回全截面
 DECAY_DAYS = int(_cfg().get("因子", {}).get("衰减天数", 30))
 CORR_MAX = float(_cfg().get("因子", {}).get("相关性阈值", 0.70))   # 两因子截面相关超过它即剔除冗余的那个
+# 每期最多用几个因子定权：样本外验证显示因子普遍弱且每期轮换，
+# 保留过多噪声因子会稀释有效信号（2因子累计超额 +149pp vs 不限制 +83pp）
+MAX_FACTORS = int(_cfg().get("因子", {}).get("最多因子数", 2))
 
 
 def factor_series(h: pd.DataFrame, pe: float = None, pb: float = None,
@@ -184,14 +187,27 @@ def ic_summary(ics: pd.DataFrame) -> tuple:
     return ic, ir
 
 
+def cap_weights(w: dict, n: int | None = None) -> dict:
+    """只保留 |权重| 最大的前 n 个因子并重新归一化（n 默认取 MAX_FACTORS）。
+    因子普遍弱且每期轮换时，多保留因子等于把噪声一起加权，会稀释有效信号。"""
+    limit = MAX_FACTORS if n is None else int(n)
+    if limit <= 0 or len(w) <= limit:
+        return dict(w)
+    top = sorted(w.items(), key=lambda kv: abs(kv[1]), reverse=True)[:limit]
+    s = sum(abs(v) for _, v in top)
+    return {f: v / s for f, v in top} if s > 0 else {}
+
+
 def ic_weights(ic: dict, keep: set | None = None) -> dict:
     """|IC|<门槛剔除；剩余按 |IC| 归一化，保留符号（负IC=反转因子）。
-    keep: 相关性去冗余后允许保留的因子集合（None=不剔除）。"""
+    keep: 相关性去冗余后允许保留的因子集合（None=不剔除）。
+    最后按 |权重| 截断到 MAX_FACTORS 个，避免弱因子噪声稀释信号。"""
     valid = {f: v for f, v in ic.items() if abs(v) >= IC_MIN}
     if keep is not None:
         valid = {f: v for f, v in valid.items() if f in keep}
     s = sum(abs(v) for v in valid.values())
-    return {f: v / s for f, v in valid.items()} if s > 0 else {}
+    w = {f: v / s for f, v in valid.items()} if s > 0 else {}
+    return cap_weights(w)
 
 
 def prune_correlated(npanel: pd.DataFrame, ic: dict,

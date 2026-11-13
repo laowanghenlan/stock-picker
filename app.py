@@ -1077,10 +1077,6 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
 
     # 计算训练期组合IC（逐因子训练IC按权重加权，衡量当前因子池整体信号强弱）
     per_ic = res.attrs.get("ic") or {}
-    ic_train_composite = float(
-        sum(float(per_ic.get(f, 0.0) or 0.0) * float(w) for f, w in final_icw.items())
-    ) if final_icw else 0.0
-
     # ========== 因子衰减过滤：连续30天|IC|<0.03的因子临时剔除 ==========
     health_df = pd.DataFrame()
     try:
@@ -1090,6 +1086,14 @@ def verify_impl(cands: pd.DataFrame, progress) -> pd.DataFrame:
             final_icw = factor_learning.filter_decayed_factors(final_icw, health_df)
     except Exception:
         pass
+    # 定权后按 |权重| 截断到 MAX_FACTORS 个（复盘融合可能重新引入多余因子）
+    final_icw = factors.cap_weights(final_icw)
+    if not final_icw:
+        final_icw = factors.cap_weights(base_icw)
+    # 组合IC按最终（已截断）权重计算，门控衡量的是实际使用的因子组合
+    ic_train_composite = float(
+        sum(float(per_ic.get(f, 0.0) or 0.0) * float(w) for f, w in final_icw.items())
+    ) if final_icw else 0.0
 
     res.attrs["ic_weights"] = final_icw
     res.attrs["ic_weights_base"] = base_icw
