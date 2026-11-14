@@ -23,7 +23,7 @@ def news_risk_impl(code: str) -> list:
     """拉取该股最近新闻标题，返回近7天内命中利空关键词的标题列表。空列表=无雷。
     （无缓存装饰器，供裸运行脚本直接调用）"""
     try:
-        news = ak.stock_news_em(symbol=code)
+        news = _run_with_timeout(ak.stock_news_em, symbol=code, timeout=8)
     except Exception:
         return []
     if news is None or len(news) == 0:
@@ -63,7 +63,7 @@ def lhb_codes_impl() -> set:
     """近一月上过龙虎榜的股票代码集合（游资爆炒区，小资金回避）。接口失败返回空集。
     （无缓存装饰器，供裸运行脚本直接调用）"""
     try:
-        lhb = ak.stock_lhb_stock_statistic_em(symbol="近一月")
+        lhb = _run_with_timeout(ak.stock_lhb_stock_statistic_em, symbol="近一月", timeout=15)
         return set(lhb["代码"].astype(str).str.zfill(6))
     except Exception:
         return set()
@@ -579,7 +579,7 @@ def _board_ok(code: str) -> bool:
     return not code.startswith(("300", "301", "688", "8", "4", "920"))
 
 
-def _csi_set() -> set:
+def _csi_set_impl() -> set:
     """沪深300 + 中证500 成分股（Baostock 专用接口 query_hs300_stocks/query_zz500_stocks）；失败返回空集。"""
     try:
         import baostock as bs
@@ -599,6 +599,22 @@ def _csi_set() -> set:
     except Exception as e:
         print(f"CSI 成分股获取失败：{e}")
         return set()
+
+
+_BAOSTOCK_TIMED_OUT = False
+
+
+def _csi_set() -> set:
+    """Baostock 无响应时按空成分股集合降级，并阻止后续财报请求再次卡住。"""
+    global _BAOSTOCK_TIMED_OUT
+    if _BAOSTOCK_TIMED_OUT:
+        return set()
+    result = _run_with_timeout(_csi_set_impl, timeout=25)
+    if result is None:
+        _BAOSTOCK_TIMED_OUT = True
+        print("CSI 成分股获取超时，本次按空集合降级")
+        return set()
+    return result
 
 
 def screen_impl(max_price: float | None = None) -> pd.DataFrame:
@@ -694,6 +710,7 @@ def verify_impl(cands: pd.DataFrame, progress,
     用扣费后的真实收益打分，赚不回手续费的股票直接被淘汰。
     （无缓存装饰器，供裸运行脚本直接调用；progress 为进度回调，可传 lambda p, t: None）
     capital: 回测本金，None 时取本地设置（裸运行/邮件端用默认值）。"""
+    global _BAOSTOCK_TIMED_OUT
     if capital is None:
         capital = float(load_settings()["capital"])
     end_d = dt.date.today()
@@ -719,13 +736,30 @@ def verify_impl(cands: pd.DataFrame, progress,
         pass                                    # 增强失败不影响原有快照字段
     # ===== 逐票拉候选股基本面（Baostock 历史财报，免费，消除估值因子前视偏差）=====
     try:
+        if _BAOSTOCK_TIMED_OUT:
+            raise TimeoutError("Baostock 此前已无响应")
         import fundamental as fd
+        fundamental_deadline = time.monotonic() + 300
         for fi, cd in enumerate(cands["代码"].astype(str).str.zfill(6).tolist(), 1):
+            if time.monotonic() >= fundamental_deadline:
+                fundamentals = {}
+                progress(0.3, "财报拉取超过5分钟，本次统一按基本面缺失降级")
+                break
             progress(0.3 * fi / total, f"拉取财报 {fi}/{total}（baostock 串行，今日首次较慢）")
-            try:
-                fundamentals[cd] = fd.fetch_fundamental(cd)
-            except Exception:
-                continue                            # 单只失败不影响其他票
+
+            def _fetch_fundamental():
+                try:
+                    return fd.fetch_fundamental(cd)
+                except Exception:
+                    return pd.DataFrame()
+
+            fundamental = _run_with_timeout(_fetch_fundamental, timeout=20)
+            if fundamental is None:
+                _BAOSTOCK_TIMED_OUT = True
+                fundamentals = {}
+                progress(0.3, "财报接口超时，本次统一按基本面缺失降级")
+                break
+            fundamentals[cd] = fundamental
     except Exception:
         fundamentals = {}  # Baostock 整体不可用，降级：基本面因子全 NaN，自动跳过
     # ===== K线+舆情 8 路并发预取（纯 HTTP 线程安全；baostock 单连接不能并发，保持串行）=====

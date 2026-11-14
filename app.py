@@ -218,11 +218,13 @@ def _load_push_precomputed(cache_day: str, slot: str, capital: float, version: s
         except Exception:
             if spot_cache_time() == "无缓存":
                 raise
+    st.code("PRECOMPUTE_STAGE 0.050 全市场初筛")
     cand = screen_impl()
     if len(cand) == 0:
         return cand, pd.DataFrame()
     cand = cand.nlargest(CANDIDATES_PUSH, "成交额")
-    res = verify_impl(cand, lambda p, t: None, float(capital))
+    res = verify_impl(
+        cand, lambda p, t: st.code(f"PRECOMPUTE_STAGE {p:.3f} {t}"), float(capital))
     return cand, res
 
 
@@ -300,7 +302,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.23.0"     # v1.23.0 GitHub 定时唤醒 Web，由 Web 复用预热结果并发送邮件
+APP_VERSION = "v1.23.1"     # v1.23.1 预热增加阶段日志与数据接口超时降级
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():

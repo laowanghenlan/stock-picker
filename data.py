@@ -363,14 +363,26 @@ def _read_ind_cache() -> dict:
         return {}
 
 
+_INDUSTRY_FAIL_AT = 0.0
+
+
 def _fetch_industry(code: str) -> str:
-    """抓取单只股票的行业（东财个股信息），失败返回空串"""
+    """抓取单只股票的行业；接口无响应时限时降级，避免阻塞整个预计算。"""
+    global _INDUSTRY_FAIL_AT
+    if time.time() - _INDUSTRY_FAIL_AT < 1800:
+        return ""
+    ex = ThreadPoolExecutor(max_workers=1)
     try:
-        info = ak.stock_individual_info_em(symbol=code)
+        info = ex.submit(ak.stock_individual_info_em, symbol=code).result(timeout=8)
         hit = info[info["item"] == "行业"]
         return str(hit.iloc[0]["value"]).strip() if len(hit) else ""
+    except FuturesTimeout:
+        _INDUSTRY_FAIL_AT = time.time()
+        return ""
     except Exception:
         return ""
+    finally:
+        ex.shutdown(wait=False)
 
 
 def industry_map_impl(codes) -> dict:

@@ -63,14 +63,19 @@ def _wake_if_needed(page, markers: tuple[str, ...]) -> None:
 
 def _wait_marker(page, markers: tuple[str, ...], timeout_seconds: int) -> tuple[str, str]:
     deadline = time.monotonic() + timeout_seconds
-    text = ""
+    text, last_stage = "", ""
     while time.monotonic() < deadline:
         text = _body_text(page)
         for marker in markers:
             if marker in text:
                 return marker, text
+        stages = [line.strip() for line in text.splitlines() if "PRECOMPUTE_STAGE" in line]
+        if stages and stages[-1] != last_stage:
+            last_stage = stages[-1]
+            print(last_stage, flush=True)
         page.wait_for_timeout(2000)
-    raise TimeoutError(f"{timeout_seconds} 秒内未观察到 {' / '.join(marker for marker in markers)}")
+    raise TimeoutError(f"{timeout_seconds} 秒内未观察到 {' / '.join(marker for marker in markers)}；"
+                       f"最后阶段：{last_stage or '未收到阶段标记'}")
 
 
 def _safe_text(text: str, token: str) -> str:
@@ -95,7 +100,9 @@ def run() -> int:
         return 2
     base_url = os.environ.get("PUSH_WEB_URL", DEFAULT_WEB_URL).strip()
     target = _target_url(base_url, action, slot, token)
-    timeout_seconds = int(os.environ.get("PUSH_BROWSER_TIMEOUT", "3600"))
+    # 预热最多等到准点前 5 分钟，避免失败任务占用并发组、阻塞正式推送。
+    timeout_seconds = int(os.environ.get(
+        "PUSH_BROWSER_TIMEOUT", "1500" if action == "warmup" else "3600"))
     # 参数/令牌错误统一由 Web 输出 PUSH_ERROR，预热请求也必须立即识别。
     markers = (("WARMUP_OK", "WARMUP_ERROR", "PUSH_ERROR") if action == "warmup"
                else ("PUSH_OK", "PUSH_ERROR"))
