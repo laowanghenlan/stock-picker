@@ -7,6 +7,7 @@
 """
 import base64
 import datetime as dt
+import hmac
 import json
 import os
 import sys
@@ -32,7 +33,7 @@ from strategy import (at_limit_down, at_limit_up, backtest, calibrate_win_rate,
 import factors  # L1 多因子层：动量/波动率/换手/估值 + 行业中性 + 20日IC均值配权
 # 选股引擎统一放在 screen_service（纯 Python，无 Streamlit 依赖）；
 # 这里显式导入，保证 app.xxx 在测试/脚本里沿用原名字
-from screen_service import (CANDIDATES, HISTORY_DAYS, IC_GATE, MIN_PRICE, ML_WEIGHT,
+from screen_service import (CANDIDATES, CANDIDATES_PUSH, HISTORY_DAYS, IC_GATE, MIN_PRICE, ML_WEIGHT,
                             REVIEW_CACHE_KEY, REVIEW_N, SETTINGS_FILE, STOP_LOSS_PCT,
                             TAKE_PROFIT_PCT, _CORR_THRESHOLD, _USE_CORR_FILTER,
                             _confidence, _correlation_filter, _kelly_position, _num,
@@ -115,7 +116,8 @@ def send_email_with_results(plan, mined, capital, leftover, cold, idx_close, idx
             d["review"] = daily_push.build_review(rv)
         except Exception:
             pass
-        # 留档供周末复盘（与 daily_push._collect 相同的记录格式）
+        daily_push.send(daily_push._render_text(d), daily_push._render_html(d))
+        # SMTP 成功后才留档，避免发送失败留下并未推送的推荐记录。
         try:
             rec = plan[["代码", "名称", "现价", "买入股数"]].copy()
             rec.insert(0, "日期", d["date"])
@@ -124,7 +126,6 @@ def send_email_with_results(plan, mined, capital, leftover, cold, idx_close, idx
             daily_push._append_log(rec)                       # 统一整表重写，避免追加时列错位
         except Exception:
             pass
-        daily_push.send(daily_push._render_text(d), daily_push._render_html(d))
         return True, f"已发送到 {os.environ['QQ_EMAIL']}"
     except Exception as e:
         return False, f"发邮件失败：{type(e).__name__}: {e}"
@@ -171,15 +172,139 @@ def save_settings(capital: float) -> tuple[bool, str]:
         return False, f"本金已在本页生效，但同步到 GitHub 失败：{str(e)[:60]}"
 
 
+def _gh_upload_file(path: Path, message: str) -> tuple[bool, str]:
+    """把一个运行留档文件回传仓库；邮件状态仍由 GitHub 触发器单独判重。"""
+    token = _gh_token()
+    if not token:
+        return False, "未配置 GH_TOKEN"
+    url = f"https://api.github.com/repos/{GH_REPO}/contents/{path.name}"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    try:
+        r = requests.get(url, headers=headers, params={"ref": GH_BRANCH}, timeout=15)
+        body = {"message": message,
+                "content": base64.b64encode(path.read_bytes()).decode(),
+                "branch": GH_BRANCH}
+        if r.status_code == 200:
+            body["sha"] = r.json()["sha"]
+        elif r.status_code != 404:
+            r.raise_for_status()
+        requests.put(url, headers=headers, json=body, timeout=15).raise_for_status()
+        return True, "已同步"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {str(e)[:80]}"
+
+
+def _sync_push_artifacts() -> list[str]:
+    """邮件成功后同步复盘留档；同步失败只告警，绝不因此重发邮件。"""
+    if not _gh_token():
+        return ["未配置 GH_TOKEN，推送留档未回传"]
+    errors = []
+    for name in ("推送记录.csv", "实盘台账.csv", "因子历史IC.csv"):
+        path = Path(__file__).parent / name
+        if not path.exists():
+            continue
+        ok, msg = _gh_upload_file(path, f"Web 推送留档 {dt.date.today():%Y-%m-%d}")
+        if not ok:
+            errors.append(f"{name}: {msg}")
+    return errors
+
+
+@st.cache_data(ttl=10800, show_spinner=False)
+def _load_push_precomputed(cache_day: str, slot: str, capital: float, version: str):
+    """预热邮件专用选股结果，供同一时段的不同浏览器会话复用。"""
+    if not spot_fresh_enough(1800):
+        try:
+            refresh_spot()
+        except Exception:
+            if spot_cache_time() == "无缓存":
+                raise
+    cand = screen_impl()
+    if len(cand) == 0:
+        return cand, pd.DataFrame()
+    cand = cand.nlargest(CANDIDATES_PUSH, "成交额")
+    res = verify_impl(cand, lambda p, t: None, float(capital))
+    return cand, res
+
+
+def _trigger_secret(name: str) -> str:
+    try:
+        return str(os.environ.get(name) or st.secrets.get(name, "") or "")
+    except Exception:
+        return str(os.environ.get(name, "") or "")
+
+
+def _handle_scheduled_action() -> bool:
+    """处理 GitHub 浏览器触发；返回 True 时由调用方停止普通页面渲染。"""
+    action = str(st.query_params.get("action", "") or "")
+    if not action:
+        return False
+    if action not in ("warmup", "push"):
+        st.code("PUSH_ERROR")
+        st.error("未知定时任务 action")
+        return True
+    token = str(st.query_params.get("token", "") or "")
+    expected = _trigger_secret("PUSH_TRIGGER_TOKEN")
+    if not expected or not hmac.compare_digest(token, expected):
+        st.code("PUSH_ERROR")
+        st.error("定时任务令牌无效")
+        return True
+    slot = str(st.query_params.get("slot", "am") or "am")
+    if slot not in ("am", "pm"):
+        st.code("PUSH_ERROR")
+        st.error("slot 必须是 am 或 pm")
+        return True
+
+    marker = "WARMUP" if action == "warmup" else "PUSH"
+    try:
+        capital = float(load_settings()["capital"])
+        cache_day = (pd.Timestamp.now(tz="UTC") + pd.Timedelta(hours=8)).strftime("%Y-%m-%d")
+        precomputed = _load_push_precomputed(cache_day, slot, capital, APP_VERSION)
+        if action == "warmup":
+            st.code("WARMUP_OK")
+            st.success(f"{cache_day} {slot} 预热完成：{len(precomputed[0])} 只候选")
+            return True
+
+        email = _trigger_secret("QQ_EMAIL")
+        auth = _trigger_secret("QQ_AUTH_CODE")
+        if not (email and auth):
+            raise RuntimeError("Streamlit Secrets 未配置 QQ_EMAIL / QQ_AUTH_CODE")
+        os.environ["QQ_EMAIL"] = email
+        os.environ["QQ_AUTH_CODE"] = auth
+        os.environ["PUSH_SLOT"] = slot
+        import daily_push
+        daily_push.CAPITAL = capital
+        d = daily_push._collect(precomputed=precomputed, archive=False)
+        daily_push.send(daily_push._render_text(d), daily_push._render_html(d))
+        st.code("PUSH_OK")
+        st.success(f"{slot} 时段邮件已发送")
+        try:
+            daily_push._archive(d)
+            errors = _sync_push_artifacts()
+            if errors:
+                st.code("ARCHIVE_WARN")
+                st.warning("；".join(errors))
+            else:
+                st.code("ARCHIVE_OK")
+        except Exception as archive_error:
+            st.code("ARCHIVE_WARN")
+            st.warning(f"邮件已发送，留档同步失败：{str(archive_error)[:160]}")
+    except Exception as e:
+        st.code(f"{marker}_ERROR")
+        st.error(f"定时任务失败：{type(e).__name__}: {str(e)[:160]}")
+    return True
+
+
 # web UI 沿用原名 screen；GitHub Actions 等裸运行环境请调 screen_impl
 screen = screen_impl
 
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.22.2"     # v1.22.2 邮件去掉GitHub改本金入口，网页输入本金自动保存并同步邮件
+APP_VERSION = "v1.23.0"     # v1.23.0 GitHub 定时唤醒 Web，由 Web 复用预热结果并发送邮件
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
+if _handle_scheduled_action():
+    st.stop()
 st.title("📈 每日选股")
 st.caption(APP_VERSION)
 

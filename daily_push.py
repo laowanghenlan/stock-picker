@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-每日自动推送脚本（由 GitHub Actions 定时触发，周一至周五北京时间 8:00 与 20:00；
-同一天两个时段各自冗余重试，同一时段已发则跳过，早晚互不影响）
+每日邮件共用模块（GitHub 定时唤醒 Streamlit Web，周一至周五北京时间 8:00 与 20:00；
+本地也可手动兜底发送；同一时段已发则跳过，早晚互不影响）
 流程：全市场筛选 -> 扣费回测 -> 舆情排雷 -> 本金+收益自动定只数 -> 分配本金 -> QQ邮箱推送
 邮件同时输出 HTML（卡片排版）与纯文本（兜底）两个版本
 """
@@ -11,15 +11,8 @@ import os
 import sys
 from pathlib import Path
 
-BASE_DIR = Path(__file__).parent
-STATE_FILE = BASE_DIR / "推送状态.json"    # 记录最后发送日期，供冗余 cron 判重
-
-
-def _today() -> str:
-    """北京时间的今天。GitHub Actions 运行在 UTC：7:00 北京 = 前一天 23:00 UTC，
-    若用 UTC 日期判重，8:20 那次补发会被当成新的一天而重复发信。"""
-    return (_datetime.datetime.now(_datetime.timezone.utc)
-            + _datetime.timedelta(hours=8)).strftime("%Y-%m-%d")
+from push_state import (_already_sent, _mark_sent_today, _sent_slots, _slot,
+                        _today)
 
 
 def _now_hm() -> str:
@@ -41,31 +34,6 @@ def _append_log(rec) -> None:
     if "推送时间" in out.columns:                 # 旧记录没有该列 → 补空，避免复盘分批时出现 NaN
         out["推送时间"] = out["推送时间"].fillna("")
     out.to_csv(LOG_FILE, index=False, encoding="utf-8-sig")
-
-
-def _slot() -> str:
-    """推送时段：am=早上8点，pm=晚上8点。工作流按触发的 cron 注入 PUSH_SLOT；
-    手动/外部兜底触发不走判重（PUSH_FORCE=1），取默认 am 只为落标记。"""
-    return "pm" if os.environ.get("PUSH_SLOT") == "pm" else "am"
-
-
-def _sent_slots() -> set:
-    """读出今天已推送的时段集合；日期变了就重置。
-    旧格式只有 {"last_sent": 日期}，那时一天只发早上一次，按已发 am 处理。"""
-    try:
-        st = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return set()                      # 读不到状态就按"没发过"处理，宁可重复也不漏发
-    if st.get("last_sent") != _today():
-        return set()
-    slots = st.get("slots")
-    return set(slots) if isinstance(slots, list) else {"am"}
-
-
-def _already_sent() -> bool:
-    """当天这个时段是否已经推送过（冗余 cron 只发一次用）。
-    早晚两班各自判重：早上发过不影响晚上再发，晚上重试也不会重复。"""
-    return _slot() in _sent_slots()
 
 
 # 判重必须在 import app 之前：app 会连带加载 akshare 等重依赖，白等约 2 分钟
@@ -97,26 +65,13 @@ def _load_capital() -> float:
 
 CAPITAL = _load_capital()                             # 本金（元），web 与邮件统一来源
 TO_ADDR = os.environ["QQ_EMAIL"]                        # 收件邮箱（与发件邮箱相同）
-AUTH_CODE = os.environ["QQ_AUTH_CODE"]                  # QQ邮箱SMTP授权码（存于GitHub Secrets）
+AUTH_CODE = os.environ["QQ_AUTH_CODE"]                  # QQ邮箱SMTP授权码（Web Secrets 或本地环境变量）
 LOG_FILE = Path(__file__).parent / "推送记录.csv"       # 推送留档，供周末复盘用
 IC_GATE = app.IC_GATE                                 # 训练期组合IC低于此值则今日空仓（信号太弱）
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.22.2"
-
-
-def _mark_sent_today() -> None:
-    """发送成功后把今天这个时段记进状态；由工作流回传仓库，供后续冗余触发判断"""
-    try:
-        slots = _sent_slots()
-        slots.add(_slot())
-        STATE_FILE.write_text(
-            json.dumps({"last_sent": _today(), "slots": sorted(slots)},
-                       ensure_ascii=False, indent=2),
-            encoding="utf-8")
-    except Exception as e:
-        print("写入推送状态失败(不影响已发出的邮件):", e)
+APP_VERSION = "v1.23.0"
 
 
 FONT = "-apple-system,'PingFang SC','Microsoft YaHei',Arial,sans-serif"
@@ -237,7 +192,21 @@ def build_last_batch(rv: pd.DataFrame) -> dict | None:
             "losses": int(sum(1 for x in rows if x["盈亏%"] < 0))}
 
 
-def _collect() -> dict:
+def _archive(d: dict) -> None:
+    """SMTP 成功后归档一次；重复调用不会重复写入同一批记录。"""
+    payload = d.pop("_archive_data", None)
+    if payload is None:
+        return
+    rec, date_str, ptime, ledger_rows = payload
+    _append_log(rec)
+    try:
+        import oos_ledger
+        oos_ledger.record(date_str, ptime, ledger_rows)
+    except Exception as e:
+        print("OOS台账记录失败(不影响推送):", e)
+
+
+def _collect(precomputed=None, archive: bool = True) -> dict:
     date_str = _today()
     idx_close, idx_ma60, cold = app.market_temperature_impl()
     d = {
@@ -262,13 +231,18 @@ def _collect() -> dict:
         "news_warn": "",      # 舆情接口降级警示（不阻断推荐，仅提示排雷可信度下降）
     }
 
-    cand = app.screen_impl()                   # 初筛（内部经 get_spot_impl 拉全市场行情）
+    if precomputed is None:
+        cand = app.screen_impl()               # 初筛（内部经 get_spot_impl 拉全市场行情）
+        res = None
+    else:
+        cand, res = precomputed                # Web 预热结果：跨会话复用，不重复拉取和回测
     if len(cand) == 0:
         d["note"] = "今日初筛无符合条件的股票，空仓等待。"
         return d
 
     cand = cand.nlargest(app.CANDIDATES_PUSH, "成交额")   # 邮件端在后台跑，用更大的候选池
-    res = app.verify_impl(cand, lambda p, t: None)        # 无界面，进度回调置空
+    if res is None:
+        res = app.verify_impl(cand, lambda p, t: None)    # 无界面，进度回调置空
     if len(res) == 0:
         _hf = res.attrs.get("hist_failed", [])
         if _hf and len(_hf) >= len(cand):
@@ -318,16 +292,17 @@ def _collect() -> dict:
     ptime = _now_hm()
     rec.insert(1, "推送时间", ptime)
     rec["大盘标签"] = d["tag"]
-    _append_log(rec)
     # 实盘 OOS 台账：同一次推送的评分与价格再记一份，事后按5/10日收益滚动算真实IC
     try:
-        import oos_ledger
         _sc = {str(s2["代码"]).zfill(6): float(s2["总分"]) for _, s2 in ranked.iterrows()
                if "总分" in ranked.columns and pd.notna(s2.get("总分"))}
-        oos_ledger.record(date_str, ptime, [
+        ledger_rows = [
             {"代码": p["代码"], "名称": p["名称"],
              "评分": _sc.get(str(p["代码"]).zfill(6)), "现价": float(p["现价"])}
-            for _, p in plan.iterrows()])
+            for _, p in plan.iterrows()]
+        d["_archive_data"] = (rec, date_str, ptime, ledger_rows)
+        if archive:
+            _archive(d)
     except Exception as e:
         print("OOS台账记录失败(不影响推送):", e)
     return d
@@ -697,13 +672,13 @@ def _html_wrap(inner: str) -> str:
 
 
 def build_email() -> tuple:
-    """跑一遍完整选股流程，返回 (纯文本正文, HTML正文)"""
-    d = _collect()
+    """跑一遍完整选股流程，返回 (纯文本正文, HTML正文)，不在发送前归档。"""
+    d = _collect(archive=False)
     return _render_text(d), _render_html(d)
 
 
 def send(text: str, html: str):
-    """通过QQ邮箱SMTP发送（授权码从GitHub Secrets注入，不落盘）"""
+    """通过QQ邮箱SMTP发送（授权码从 Streamlit Secrets 或本地环境变量注入）。"""
     _, _, cold = app.market_temperature_impl()
     tag = "低温期" if cold else "回暖期"
     msg = MIMEMultipart("alternative")
@@ -722,7 +697,9 @@ def send(text: str, html: str):
 if __name__ == "__main__":
     # 当天已发的判重已在文件顶部（import app 之前）完成，这里只负责发送
     try:
-        send(*build_email())
+        d = _collect(archive=False)
+        send(_render_text(d), _render_html(d))
+        _archive(d)
         _mark_sent_today()
         print("推送成功")
     except Exception as e:
