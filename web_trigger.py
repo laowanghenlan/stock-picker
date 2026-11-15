@@ -140,7 +140,8 @@ def run() -> int:
                 # 一旦邮件成功，立即记录状态；后续归档超时绝不触发重发。
                 _mark_sent_today()
                 if not _already_sent():
-                    raise RuntimeError("邮件已发送，但推送状态写入失败")
+                    print("警告：邮件已发送，但推送状态未写入，将以推送记录留档兜底判重",
+                          file=sys.stderr)
                 _workflow_result("sent")
                 print(f"Web {slot} 时段邮件发送成功，已记录推送状态")
                 try:
