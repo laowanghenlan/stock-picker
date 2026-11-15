@@ -60,6 +60,11 @@ MAX_STOCKS = 100
 LOOKBACK_DAYS = 1150   # 自然日 ≈ 780 个交易日，够 250 训练 + 8 期测试
 IC_GATE = 0.02         # 训练期组合 IC 均值低于此值则本期空仓不选股
 
+# ---- 因子稳定性约束（--stable 开启）：只过滤入选资格，不改权重计算 ----
+STABLE_BLOCKS = 4        # 训练窗切成4段（约60个交易日）检验方向一致性
+STABLE_MIN_BLOCKS = 3    # 至少3段子窗IC与全窗IC同号
+STABLE_ICIR_MIN = 0.20   # 全窗 |ICIR| 下限（日频IC均值/标准差）
+
 
 def _industry_map(codes: list[str]) -> dict:
     """代码→证监会行业。用 Baostock 全市场行业表（一次查询，不逐股请求）。"""
@@ -140,7 +145,7 @@ def _download(code: str, start: str, end: str, refresh: bool) -> pd.DataFrame | 
     try:
         import requests
         u = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
-             f"CN_MarketData.getKLineData?symbol={pfx}{n}&scale=240&ma=no&datalen=1200")
+             f"CN_MarketData.getKLineData?symbol={pfx}{n}&scale=240&ma=no&datalen=2000")
         j = requests.get(u, timeout=20, headers={"User-Agent": "Mozilla/5.0"}).json()
         if isinstance(j, list) and len(j) > 300:
             h = pd.DataFrame(j).rename(columns={"day": "日期", "close": "收盘",
@@ -153,10 +158,13 @@ def _download(code: str, start: str, end: str, refresh: bool) -> pd.DataFrame | 
             if len(h) < 300:
                 return None
             out = h[["日期", "收盘", "最高", "最低", "成交量"]]
-            out.to_csv(f, index=False, encoding="utf-8-sig")
+            try:
+                out.to_csv(f, index=False, encoding="utf-8-sig")
+            except Exception as we:
+                print(f"  {code} 缓存写入失败（不影响本次计算）：{type(we).__name__}: {we}")
             return out
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  新浪 {code} 下载/解析失败：{type(e).__name__}: {e}")
     # 东财兜底（可能被限流，只试一次）
     try:
         import akshare as ak
@@ -389,6 +397,35 @@ def _period_icir(npanel: pd.DataFrame, dates: list, factors_use: list[str]) -> d
     return out
 
 
+def _stable_factors(npanel: pd.DataFrame, train_lbl: list, ic_tr: dict, icir_tr: dict,
+                    blocks: int = STABLE_BLOCKS, min_blocks: int = STABLE_MIN_BLOCKS,
+                    icir_min: float = STABLE_ICIR_MIN) -> dict:
+    """因子稳定性约束：全窗 |ICIR| 达标且与IC同号 + 训练窗分段IC方向一致。
+    只决定"有没有资格入选"，不改变权重——用于干净地检验稳定性过滤本身是否有效。
+    返回 {因子: {"ICIR":…, "同向子窗":…}}。"""
+    n = len(train_lbl)
+    chunks = [train_lbl[i * n // blocks:(i + 1) * n // blocks] for i in range(blocks)]
+    out = {}
+    for f, ic in ic_tr.items():
+        col = f + "_n"
+        if col not in npanel.columns or pd.isna(ic) or abs(ic) < factors.IC_MIN:
+            continue
+        ir = icir_tr.get(f, 0.0)
+        if ir * ic <= 0 or abs(ir) < icir_min:
+            continue
+        sign = np.sign(ic)
+        hits = 0
+        for ck in chunks:
+            if not ck:
+                continue
+            v = _ic_of(npanel, ck, col)
+            if v == v and np.sign(v) == sign and abs(v) > 1e-12:
+                hits += 1
+        if hits >= min_blocks:
+            out[f] = {"ICIR": ir, "同向子窗": hits}
+    return out
+
+
 def _score_series(npanel: pd.DataFrame, dates: list, w: dict) -> dict:
     """每日评分（代码 -> 分数，降序），供两种调仓规则共用。"""
     out = {}
@@ -609,7 +646,8 @@ def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
         rebal: int = REBAL, rule: str = "fixed", exit_pct: float = EXIT_PCT,
         pool: str = "lowprice",
         ml: bool = False, ml_weight: float = 0.20,
-        use_industry: bool = False, lookback_days: int = LOOKBACK_DAYS):
+        use_industry: bool = False, lookback_days: int = LOOKBACK_DAYS,
+        fund_reserve: int = 0, stable: bool = False):
     ml_weight = max(0.0, min(0.5, float(ml_weight)))
     fund_all = n_fund < 0                 # -1 = 全部股票都抓财报（默认，与实盘一致）
     hists, meta = _load_universe(max_stocks, refresh, pool, use_industry, lookback_days)
@@ -641,11 +679,13 @@ def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
         if len(test_dates) < TEST:
             break
 
-        # ---------- 训练：逐因子IC → 去冗余 → 定权（ICIR仅作诊断，不参与选股） ----------
+        # ---------- 训练：逐因子IC → 稳定性过滤(可选) → 去冗余 → 定权 ----------
         ic_tr = _period_ic(npanel, train_lbl, factors.ALL_FACTOR_COLS)
         icir_tr = _period_icir(npanel, train_lbl, factors.ALL_FACTOR_COLS)
-        keep = factors.prune_correlated(npanel[npanel["日期"].isin(train_lbl)], ic_tr)
-        w = factors.ic_weights(ic_tr, keep=keep)
+        stable_info = _stable_factors(npanel, train_lbl, ic_tr, icir_tr) if stable else None
+        ic_allowed = {f: v for f, v in ic_tr.items() if f in stable_info} if stable else ic_tr
+        keep = factors.prune_correlated(npanel[npanel["日期"].isin(train_lbl)], ic_allowed)
+        w = factors.ic_weights(ic_tr, keep=keep, fund_reserve=fund_reserve)
         if not w:
             rows.append({"期数": k + 1, "训练结束": str(train_all[-1])[:10],
                          "测试区间": f"{str(test_dates[0])[:10]}~{str(test_dates[-1])[:10]}",
@@ -737,6 +777,7 @@ def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
             ic_rows.append({"期数": k + 1, "因子": f,
                             "训练IC": round(v, 4) if v == v else None,
                             "训练ICIR": round(icir_tr.get(f, 0.0), 4),
+                            "稳定达标": (f in stable_info) if stable else None,
                             "入选": f in w,
                             "测试IC": round(ic_te.get(f, np.nan), 4)
                             if ic_te.get(f, np.nan) == ic_te.get(f, np.nan) else None})
@@ -757,6 +798,8 @@ def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
             })
         line = (f"  第{k + 1}期 {rows[-1]['测试区间']}：组合 {m['net']:+.2%} / 基准 {bench:+.2%} / "
                 f"测试IC {ic_test:+.3f} / 换手 {turn} 次 / 持有 {avg_hold:.0f} 天")
+        if stable:
+            line += f" / 稳定达标 {len(stable_info)} 个"
         if ml:
             line += (f" / ML {ml_m['net']:+.2%}、IC {ic_ml:+.3f}" if ml_m
                      else f" / ML未参与（训练验证IC {ml_meta.get('oof_ic', float('nan')):+.3f}）")
@@ -772,12 +815,17 @@ def run(max_stocks: int = MAX_STOCKS, refresh: bool = False, n_fund: int = 0,
         tag += f"_ml{round(ml_weight * 100)}"
     if n_fund > 0:
         tag += f"_fund{n_fund}"
-    ic_file = (f"因子IC_样本外逐期_{tag}.csv" if (ml or use_industry or n_fund > 0)
+    if fund_reserve > 0:
+        tag += f"_fr{fund_reserve}"
+    if stable:
+        tag += "_stable"
+    ic_file = (f"因子IC_样本外逐期_{tag}.csv"
+               if (pool != "lowprice" or ml or use_industry or n_fund > 0 or fund_reserve > 0)
                else "因子IC_样本外逐期.csv")
     _safe_to_csv(res, HERE / f"滚动样本外验证_{tag}.csv")
     _safe_to_csv(pd.DataFrame(ic_rows), HERE / ic_file)
     if (not ml and rule == "fixed" and rebal == REBAL and pool == "lowprice"
-            and not use_industry and fund_all):
+            and not use_industry and fund_all and fund_reserve == 0):
         _safe_to_csv(res, HERE / "滚动样本外验证.csv")  # 默认口径（含财报因子，与实盘一致）
 
     # ---------- 汇总 ----------
@@ -846,7 +894,12 @@ if __name__ == "__main__":
                     help="联网补齐行业映射（默认关闭，全部按未分类=全截面中性）")
     ap.add_argument("--lookback", type=int, default=LOOKBACK_DAYS,
                     help="回看自然日数，默认1150（约7期）；1350可跑8期以上")
+    ap.add_argument("--fund-reserve", type=int, default=0,
+                    help="给方向为正的财务因子预留的名额（默认0；1=至少留1个财务因子）")
+    ap.add_argument("--stable", action="store_true",
+                    help="因子稳定性约束：|ICIR|>=0.20且训练窗4段中>=3段IC同向才允许入选（只过滤，不改权重）")
     a = ap.parse_args()
     run(max_stocks=a.max, refresh=a.refresh, n_fund=a.fund, rebal=a.rebal,
         rule=a.rule, exit_pct=a.exit_pct, pool=a.pool, ml=a.ml, ml_weight=a.ml_weight,
-        use_industry=a.industry, lookback_days=a.lookback)
+        use_industry=a.industry, lookback_days=a.lookback, fund_reserve=a.fund_reserve,
+        stable=a.stable)
