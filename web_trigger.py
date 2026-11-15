@@ -36,28 +36,41 @@ def _workflow_result(value: str) -> None:
             f.write(f"result={value}\n")
 
 
+def _app_frames(page) -> list:
+    """Streamlit Cloud 把应用正文放在 streamlitApp iframe 里，必须进子框架读取。"""
+    frames = [f for f in page.frames
+              if "/~/+" in (f.url or "") or f.name == "streamlitApp"]
+    return frames or [page.main_frame]
+
+
 def _body_text(page) -> str:
-    try:
-        return page.locator("body").inner_text(timeout=10000)
-    except Exception:
-        return ""
+    texts = []
+    for frame in _app_frames(page):
+        try:
+            t = frame.locator("body").inner_text(timeout=8000)
+        except Exception:
+            t = ""
+        if t and t.strip() != "Manage app":
+            texts.append(t)
+    return "\n".join(texts)
 
 
 def _wake_if_needed(page, markers: tuple[str, ...]) -> None:
     """Streamlit Cloud 休眠页需要先点击唤醒，已运行时直接等待结果。"""
-    deadline = time.monotonic() + 90
-    button = page.get_by_role(
-        "button", name=re.compile(r"get this app back up|wake.*app|唤醒", re.I))
+    deadline = time.monotonic() + 120
+    pattern = re.compile(r"get this app back up|wake.*app|唤醒", re.I)
     while time.monotonic() < deadline:
         text = _body_text(page)
         if any(marker in text for marker in markers):
             return
-        try:
-            if button.count() and button.first.is_visible():
-                button.first.click()
-                return
-        except Exception:
-            pass
+        for frame in _app_frames(page):
+            try:
+                button = frame.get_by_role("button", name=pattern)
+                if button.count() and button.first.is_visible():
+                    button.first.click()
+                    return
+            except Exception:
+                pass
         page.wait_for_timeout(2000)
 
 
