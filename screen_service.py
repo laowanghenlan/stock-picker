@@ -812,9 +812,9 @@ def verify_impl(cands: pd.DataFrame, progress,
             fee = float(bs["累计手续费"].rstrip("元"))
             avg_win, avg_loss = _trade_stats(sig)
             risk_hits = news_pre[code] if code in news_pre else _fetch_one_news(code)  # 新闻+巨潮公告（优先用并发预取结果）
-            if risk_hits is None:                   # 舆情接口失败：降级为"无雷"并记录，不再整票跳过
-                risk_hits = []
+            if risk_hits is None:                   # 舆情取数失败：风险未知，该票直接不推荐（fail-closed）
                 news_failed.append(code)
+                continue
             last = sig.iloc[-1]
             # 技术面硬条件：当前价在20日线上，且5日线在20日线上（趋势仍向上）
             # _fast/_slow 是信号表里的 MA5/MA20 列
@@ -839,7 +839,7 @@ def verify_impl(cands: pd.DataFrame, progress,
         progress(0.65 + 0.35 * (i + 1) / total, f"回测验证中 {i + 1}/{total}：{r['名称']}")
     res = pd.DataFrame(rows)
     res.attrs["hist_failed"] = hist_failed      # 行情取数失败的候选（数据源问题，非选股结论）
-    res.attrs["news_failed"] = news_failed      # 舆情取数失败、按"无雷"降级的候选
+    res.attrs["news_failed"] = news_failed      # 舆情取数失败、风险无法核实而被剔除的候选
     res.attrs["n_cands"] = total
     # 因子IC检验：行业中性化 → 逐交易日横截面IC → 最近20日均值定权
     try:

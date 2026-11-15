@@ -245,7 +245,10 @@ def _collect(precomputed=None, archive: bool = True) -> dict:
         res = app.verify_impl(cand, lambda p, t: None)    # 无界面，进度回调置空
     if len(res) == 0:
         _hf = res.attrs.get("hist_failed", [])
-        if _hf and len(_hf) >= len(cand):
+        _nf = res.attrs.get("news_failed", [])
+        if _nf and len(_nf) >= len(cand):
+            d["note"] = "舆情数据源暂时不可用，候选股风险无法核实，今日不推荐（这不是选股结论），请稍后重试。"
+        elif _hf and len(_hf) >= len(cand):
             d["note"] = "行情数据源暂时不可用（东财限流/新浪无有效返回），本次无法完成验证，不建议据此操作。"
         else:
             d["note"] = "候选股均未通过验证，今日不建议买入。"
@@ -259,7 +262,7 @@ def _collect(precomputed=None, archive: bool = True) -> dict:
         return d
     _nf = res.attrs.get("news_failed", [])
     if _nf:
-        d["news_warn"] = f"舆情接口异常，{len(_nf)} 只候选按无雷降级处理，排雷结果仅供参考。"
+        d["news_warn"] = f"舆情接口异常，{len(_nf)} 只候选风险无法核实，已从推荐中剔除。"
 
     mined = res[res["有雷"]]
     if len(mined) > 0:

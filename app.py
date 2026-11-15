@@ -461,7 +461,11 @@ if run:
 
     if len(res) == 0:
         _hf = res.attrs.get("hist_failed", [])
-        if _hf and len(_hf) >= len(cands):
+        _nf = res.attrs.get("news_failed", [])
+        if _nf and len(_nf) >= len(cands):
+            st.warning("舆情数据源暂时不可用，候选股风险无法核实，本次不推荐（这不是选股结论）。"
+                       "请稍后重试，不建议据此操作。")
+        elif _hf and len(_hf) >= len(cands):
             st.warning("行情数据源暂时不可用（东财限流、新浪未返回有效数据），本次无法完成验证。"
                        "这不是选股结论，请稍后重试，不建议据此操作。")
         else:
@@ -469,7 +473,7 @@ if run:
         st.stop()
     _nf = res.attrs.get("news_failed", [])
     if _nf:
-        st.caption(f"⚠️ 舆情接口异常，{len(_nf)} 只候选按“无雷”降级处理，排雷结果仅供参考："
+        st.caption(f"⚠️ 舆情接口异常，{len(_nf)} 只候选风险无法核实，已从推荐中剔除："
                    f"{', '.join(_nf[:10])}{' 等' if len(_nf) > 10 else ''}")
     # 舆情排雷通报：哪些因近7天利空新闻被排除
     mined = res[res["有雷"]]
