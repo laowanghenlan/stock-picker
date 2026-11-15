@@ -18,7 +18,6 @@ _TX_BATCH = 600            # 腾讯批量接口单次请求的股票数
 _TX_TIMEOUT = 15           # 腾讯单批请求超时（秒）
 _TX_WORKERS = 6            # 腾讯分片并发数
 _spot_fail_at = 0.0        # 所有数据源都失败的时刻：10分钟内不再重试，避免每次点击都卡满超时
-_em_fail_at = 0.0          # 东财失败时刻：30分钟内直接走腾讯，不再白等100秒
 
 
 def _read_spot_cache() -> pd.DataFrame | None:
@@ -58,24 +57,19 @@ def _all_codes() -> list[str]:
 def _fetch_spot_em() -> pd.DataFrame:
     """东财全市场快照（一次请求拿全市场，约60~80秒）。
     akshare 内部请求没有超时，云端 IP 被东财限流时会无限挂起（页面一直转圈），
-    这里用线程加硬超时，超时后由上层换腾讯备用源。"""
-    global _em_fail_at
+    这里用线程加硬超时，超时后由上层换其他源。"""
     ex = ThreadPoolExecutor(max_workers=1)
     fut = ex.submit(ak.stock_zh_a_spot_em)
     try:
         return fut.result(timeout=_SPOT_TIMEOUT)
     except FuturesTimeout:
-        _em_fail_at = time.time()
         raise TimeoutError(f"东财行情接口 {_SPOT_TIMEOUT} 秒无响应，可能被限流或网络不通")
-    except Exception:
-        _em_fail_at = time.time()
-        raise
     finally:
         ex.shutdown(wait=False)       # 不等待卡住的线程，立即把控制权交回页面
 
 
 def _fetch_spot_tx() -> pd.DataFrame:
-    """腾讯行情批量接口兜底：每批600只、6路并发，通常5秒内拿全市场。
+    """腾讯行情批量接口：每批600只、6路并发，实测30~40秒拿全市场（东财限流时也能用）。
     字段位置（~分隔）：1名称 2代码 3现价 4昨收 5今开 31涨跌额 32涨跌幅 33最高 34最低
     36成交量(手) 37成交额(万元) 38换手率 39市盈率TTM 43振幅 44流通市值(亿) 45总市值(亿)
     46市净率 49量比 52市盈率(动) 53市盈率(静)"""
@@ -123,18 +117,17 @@ def _fetch_spot_tx() -> pd.DataFrame:
 
 
 def _fetch_spot() -> pd.DataFrame:
-    """拉全市场快照：东财优先（一次拿全），失败或超时自动降级腾讯批量接口。
-    东财30分钟内翻过车就直接走腾讯，避免每次点击都白等100秒。"""
+    """拉全市场快照：腾讯批量优先（实测约40秒，东财限流时也不受影响），失败再试东财（一次拿全）。
+    两者都挂才记失败时刻，用于界面10分钟冷却提示。"""
     global _spot_fail_at
-    if time.time() - _em_fail_at >= 1800:
-        try:
-            df = _fetch_spot_em()
-            _write_spot_cache(df)
-            return df
-        except Exception:
-            pass
     try:
         df = _fetch_spot_tx()
+        _write_spot_cache(df)
+        return df
+    except Exception:
+        pass
+    try:
+        df = _fetch_spot_em()
         _write_spot_cache(df)
         return df
     except Exception:

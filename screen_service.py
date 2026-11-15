@@ -19,14 +19,17 @@ NEG_KEYWORDS = ("减持", "立案", "退市", "处罚", "问询", "警示", "冻
                 "违规", "诉讼", "仲裁", "预亏", "暴雷", "停牌", "质押", "担保逾期")
 
 
-def news_risk_impl(code: str) -> list:
+def news_risk_impl(code: str) -> list | None:
     """拉取该股最近新闻标题，返回近7天内命中利空关键词的标题列表。空列表=无雷。
+    接口失败/超时返回 None（不能当成"无雷"，由上层显式降级并告警）。
     （无缓存装饰器，供裸运行脚本直接调用）"""
     try:
         news = _run_with_timeout(ak.stock_news_em, symbol=code, timeout=8)
     except Exception:
-        return []
-    if news is None or len(news) == 0:
+        return None
+    if news is None:
+        return None
+    if len(news) == 0:
         return []
     cutoff = pd.Timestamp.now() - pd.Timedelta(days=7)
     hits = []
@@ -676,23 +679,20 @@ def _num(v):
 
 def news_and_announcements(code: str) -> list | None:
     """舆情排雷 = 东财新闻 + 巨潮公告（法定信披，立案/处罚/减持更权威）。
-    两个源都失败才返回 None（上层按"无雷"降级并标注）；任一可用即返回合并去重结果。"""
-    try:
-        n = news_risk_impl(code)
-    except Exception:
-        n = None
+    返回去重后的利空标题字符串列表；两个源都失败才返回 None（上层按"无雷"降级并标注）。
+    注意：新闻源给的是标题字符串，公告源给的是 {"标题","日期","来源"} 字典，两者都要兼容。"""
+    n = news_risk_impl(code)
     try:
         a = cninfo_risk_impl(code, days=7)
     except Exception:
         a = None
     if n is None and a is None:
         return None
-    out, seen = [], set()
-    for hit in (n or []) + (a or []):
-        t = str(hit.get("标题", ""))
-        if t and t not in seen:
-            seen.add(t)
-            out.append(hit)
+    out = []
+    for hit in list(n or []) + list(a or []):
+        t = str(hit.get("标题", "")) if isinstance(hit, dict) else str(hit)
+        if t and t not in out:
+            out.append(t)
     return out
 
 
