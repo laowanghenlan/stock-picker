@@ -1049,6 +1049,12 @@ def ensemble_refine(res: pd.DataFrame) -> pd.DataFrame:
         out = DeepRefiner().refine(stage2, npanel=npanel, lgb_scores=lgb_scores)
         diag.update(out.diagnostics)
         diag["time_s"] = round(out.stage_time_s, 1)
+        if not (diag.get("models_used") or []):
+            # 三模型全部不可用（如云端缺 scikit-learn）：集成分全是中位数0.5，
+            # 过滤形同虚设，必须如实报告未执行，不能假装精筛过
+            diag["reason"] = "三模型均不可用（缺 scikit-learn/lightgbm），跳过精筛"
+            res.attrs["stage3"] = diag
+            return res
         if len(out.passed) == 0:
             diag["reason"] = "精筛过滤后为空，回退保留全部候选"
             res.attrs["stage3"] = diag
