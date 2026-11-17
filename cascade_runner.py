@@ -336,6 +336,14 @@ class DeepRefiner:
         # 2. 三个模型预测
         predictions: dict[str, dict[str, float]] = {}
         model_loaded: list[str] = []
+        model_err: dict[str, str] = {}     # 每个模型失败的真实原因（不再用笼统文案掩盖）
+        # 环境探针：sklearn 能否导入、版本号，直接暴露"缺依赖"这类问题
+        try:
+            import sklearn
+            env_info = f"sklearn {sklearn.__version__}"
+        except Exception as e:
+            env_info = f"sklearn 导入失败 {type(e).__name__}: {e}"[:160]
+            model_err["sklearn"] = env_info
 
         # 2a. LightGBM（已存在的 ml_model；主流程复用 L2 分数时跳过训练）
         model_ic: dict[str, float] = {}
@@ -354,6 +362,7 @@ class DeepRefiner:
                         predictions["lgb"] = sc
                         model_loaded.append(f"lgb({backend})")
             except Exception as e:
+                model_err["lgb"] = f"{type(e).__name__}: {e}"[:160]
                 print(f"[Cascade Stage3] lgb 跳过: {e}")
 
         # 2b. ExtraTrees（sklearn）— 样本外IC达标才参与
@@ -363,7 +372,10 @@ class DeepRefiner:
             if sc:
                 predictions["et"] = sc
                 model_loaded.append("et")
+            else:
+                model_err["et"] = "样本外IC未达标或无有效训练数据" if ic == ic else "样本外IC无法计算"
         except Exception as e:
+            model_err["et"] = f"{type(e).__name__}: {e}"[:160]
             print(f"[Cascade Stage3] et 跳过: {e}")
 
         # 2c. MLP（sklearn.neural_network）— 样本外IC达标才参与
@@ -373,7 +385,10 @@ class DeepRefiner:
             if sc:
                 predictions["mlp"] = sc
                 model_loaded.append("mlp")
+            else:
+                model_err["mlp"] = "样本外IC未达标或无有效训练数据" if ic == ic else "样本外IC无法计算"
         except Exception as e:
+            model_err["mlp"] = f"{type(e).__name__}: {e}"[:160]
             print(f"[Cascade Stage3] mlp 跳过: {e}")
 
         # 3. 集成打分（平均 / 中位数更抗离群点）
@@ -424,6 +439,7 @@ class DeepRefiner:
                 "models_used": model_loaded,
                 "n_models": len(model_loaded),
                 "model_ic": model_ic,
+                "model_errors": model_err,
                 "code_scores": code_scores,
                 "code_ensemble_detail": code_ensemble,
                 "ensemble_threshold": threshold,

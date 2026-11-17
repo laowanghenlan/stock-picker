@@ -1050,9 +1050,10 @@ def ensemble_refine(res: pd.DataFrame) -> pd.DataFrame:
         diag.update(out.diagnostics)
         diag["time_s"] = round(out.stage_time_s, 1)
         if not (diag.get("models_used") or []):
-            # 三模型全部不可用（如云端缺 scikit-learn）：集成分全是中位数0.5，
-            # 过滤形同虚设，必须如实报告未执行，不能假装精筛过
-            diag["reason"] = "三模型均不可用（缺 scikit-learn/lightgbm），跳过精筛"
+            # 三模型都没参与：把所有模型的具体原因拼出来，不再用"缺依赖"一句话掩盖
+            errs = diag.get("model_errors") or {}
+            detail = "；".join(f"{k}: {v}" for k, v in errs.items()) or "无诊断信息"
+            diag["reason"] = f"三模型均未参与（{detail}），跳过精筛"
             res.attrs["stage3"] = diag
             return res
         if len(out.passed) == 0:
