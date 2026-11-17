@@ -24,7 +24,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-from data import (get_history, get_history_impl, get_spot, get_spot_impl,
+from data import (get_history, get_history_impl, get_spot,
                   industry_map_impl, refresh_spot, spot_cache_time, spot_fresh_enough,
                   spot_recently_failed, get_history_tx, cninfo_risk_impl, tushare_daily_basic)
 from strategy import (at_limit_down, at_limit_up, backtest, calibrate_win_rate,
@@ -535,7 +535,13 @@ if run:
         st.markdown("---")
 
     _run_t0 = time.time()                      # v1.24: 漏斗视图耗时基准
-    _spot_snapshot = get_spot_impl() if spot_fresh_enough() else None  # v1.24: 漏斗视图数据源
+    # v1.24 修复：这里必须用带缓存的 get_spot()。get_spot_impl() 是无缓存原始函数，
+    # 会无视 30 分钟新鲜度、绕过"刚失败不重试"保护，在点击瞬间重新全市场联网拉一遍，
+    # 且发生在进度条之前 → 用户看到的就是"点了一下卡住不动"。
+    try:
+        _spot_snapshot = get_spot() if spot_fresh_enough() else None
+    except Exception:
+        _spot_snapshot = None
 
     bar = st.progress(0.0, text="正在全市场初筛...")
     cands = screen(MAX_PRICE)
@@ -582,8 +588,12 @@ if run:
     with st.expander("🔻 三级漏斗可视化（v1.24）", expanded=False):
         try:
             from cascade_runner import CascadeRunner, CoarseScreener
-            # Stage1: 直接复用 verify_impl 之前的 snapshot 做粗筛（省一次联网）
-            _spot_snapshot = get_spot_impl() if _spot_snapshot is None else _spot_snapshot
+            # Stage1: 复用已缓存的快照做粗筛（绝不在这里发起新的联网拉取）
+            if _spot_snapshot is None:
+                try:
+                    _spot_snapshot = get_spot()
+                except Exception:
+                    _spot_snapshot = None
             if _spot_snapshot is not None and len(_spot_snapshot) > 100:
                 _s1 = CoarseScreener().screen(_spot_snapshot)
                 st.markdown("##### 漏斗总览")
