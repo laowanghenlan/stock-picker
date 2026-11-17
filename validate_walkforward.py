@@ -12,7 +12,7 @@
              空出的仓位按评分补足 TOP_N（降换手，省成本）
   - 真实成交约束：涨停当天不买、跌停当天不卖（顺延到可卖日）
   - 成本：双边滑点 0.1% + 佣金万2.5 + 卖出印花税 0.05% + 过户费（指数口径，忽略最低5元）
-  - 股票池：lowprice（默认，与实盘一致的 2~10.45 元主板小资金池）/ all（全 A，仅流动性约束）
+  - 股票池：lowprice（默认，与实盘一致的 10~30 元主板池）/ all（全 A，仅流动性约束）
 
 用法：
     python validate_walkforward.py                       # 旧规则：每5日全换仓（本地缓存）
@@ -230,8 +230,8 @@ def _load_universe(max_stocks: int, refresh: bool, pool: str = "lowprice",
         tag = f"沪深300+中证500（{len(csi)}只）"
     else:
         capital, n_picks = 2200.0, 2
-        min_price = 2.0
-        max_price = max(min_price + 0.5, min(50.0, capital / (n_picks * 100) * 0.95))
+        min_price = 10.0
+        max_price = 50.0
         # CSI 成分股 override：允许过板块和价格上限
         board_ok = (spot["代码"].map(_board_ok) | spot["代码"].isin(csi)).fillna(False).astype(bool)
         price_ok = (spot["最新价"].between(min_price, max_price) | spot["代码"].isin(csi)).fillna(False).astype(bool)

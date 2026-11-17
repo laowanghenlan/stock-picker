@@ -31,7 +31,7 @@ assert "代码" in spot.columns, f"缺列：代码，实际 {list(spot.columns)}
 # ---------- 3. verify（核心选股链路）----------
 print("\n③ verify 选股主流程（取前3只加速验证）...")
 # 先验证 verify_impl 的输出列是否完整
-cands = spot[(spot["最新价"] >= app.MIN_PRICE) & (spot["最新价"] <= 10.4)].head(3).copy()
+cands = spot[(spot["最新价"] >= app.MIN_PRICE) & (spot["最新价"] <= 30.0)].head(3).copy()
 res = app.verify_impl(cands, progress=lambda x, y: None)
 print(f"  verify 输出：{len(res)} 条，列={list(res.columns)}")
 

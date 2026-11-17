@@ -33,7 +33,7 @@ from strategy import (at_limit_down, at_limit_up, backtest, calibrate_win_rate,
 import factors  # L1 多因子层：动量/波动率/换手/估值 + 行业中性 + 20日IC均值配权
 # 选股引擎统一放在 screen_service（纯 Python，无 Streamlit 依赖）；
 # 这里显式导入，保证 app.xxx 在测试/脚本里沿用原名字
-from screen_service import (CANDIDATES, CANDIDATES_PUSH, HISTORY_DAYS, IC_GATE, MIN_PRICE, ML_WEIGHT,
+from screen_service import (CANDIDATES, CANDIDATES_PUSH, HISTORY_DAYS, IC_GATE, MAX_PRICE, MIN_PRICE, ML_WEIGHT,
                             REVIEW_CACHE_KEY, REVIEW_N, SETTINGS_FILE, STOP_LOSS_PCT,
                             TAKE_PROFIT_PCT, _CORR_THRESHOLD, _USE_CORR_FILTER,
                             _confidence, _correlation_filter, _kelly_position, _num,
@@ -53,6 +53,47 @@ lhb_codes = st.cache_data(ttl=43200, show_spinner=False)(lhb_codes_impl)
 
 # 缓存包装：web UI 一律调 review_performance(REVIEW_CACHE_KEY)；30分钟内重复点秒开
 review_performance = st.cache_data(ttl=1800, show_spinner="正在自动复盘最近推荐表现...")(review_impl)
+
+
+# ---------------- 数据源健康仪表盘辅助函数 ----------------
+def _pipeline_health():
+    """返回各数据源健康度 dict；pipeline 未初始化时返回 {}。"""
+    try:
+        from data_pipeline import health_snapshot
+        return health_snapshot() or {}
+    except Exception:
+        return {}
+
+
+def _warehouse_health():
+    """返回 DuckDB 数仓健康报告；warehouse 不可用时返回 status 字段标注。"""
+    try:
+        from warehouse import Warehouse
+        wh = Warehouse()
+        report = wh.health_report()
+        wh.close()
+        return report
+    except Exception as e:
+        return {"status": "error", "detail": str(e)[:80]}
+
+
+def _probe_pipeline():
+    """轻量探测：拉 2 只 K线 + 1 只基本面，触发健康度记录。"""
+    try:
+        from data_pipeline import DataPipeline
+        pl = DataPipeline()
+        pl.get_history("000001", "20250101", "20250110", full=False)
+        pl.get_history("600519", "20250101", "20250110", full=False)
+        pl.get_fundamental("600519", max_quarters=2)
+    except Exception:
+        pass
+
+
+# ---------------- 页面加载时自动探测一次数据源（无按钮，用户无感） ----------------
+if not st.session_state.get("_health_probed"):
+    _probe_pipeline()
+    st.session_state["_health_probed"] = True
+    st.session_state["_health_last_update"] = time.time()
 
 
 def send_email_with_results(plan, mined, capital, leftover, cold, idx_close, idx_ma60):
@@ -302,7 +343,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.23.1"     # v1.23.1 预热增加阶段日志与数据接口超时降级
+APP_VERSION = "v1.24"     # v1.24 多源数据管道重构 + DuckDB 数仓 + 专业统计门禁（胜率显著性/IC稳定性/VaR/分布）
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
@@ -325,7 +366,7 @@ else:
     force_run = True
 
 # ---------------- 本金输入在侧边栏（见下方 sidebar 区块），此处仅保留说明 ----------------
-# capital / n_picks / MAX_PRICE 均在侧边栏代码里赋值，本文件后面的选股逻辑直接使用
+# capital / n_picks 在侧边栏代码里赋值；MIN_PRICE / MAX_PRICE 由 strategy_config.json 决定
 
 # ---------------- 我的持仓（自动读本地持仓.csv，每天选股时自动体检） ----------------
 with st.expander("💼 持仓体检（自动读持仓.csv，选股时自动执行）", expanded=True):
@@ -357,8 +398,58 @@ with st.sidebar:
     st.caption(f"只数由本金+预期收益自动计算（当前约 {n_picks} 只起）")
     st.caption(f"行情快照时间：{spot_cache_time()}")
 
-# 股价上限：保证各只买100股也买得起；本金越大上限越宽，最高50元
-MAX_PRICE = max(MIN_PRICE + 0.5, min(50.0, capital / (n_picks * 100) * 0.95))
+    # ---------------- 数据源健康仪表盘 ----------------
+    with st.expander("🔧 数据源健康", expanded=False):
+        # 静默刷新：距离上次更新 > 30 秒就重新抓一次健康度（只读内存，不联网）
+        _now = time.time()
+        _last = st.session_state.get("_health_last_update", 0)
+        _needs_refresh = _now - _last > 30
+        if _needs_refresh:
+            st.session_state["_health_last_update"] = _now
+            st.rerun()
+
+        st.caption("多源动态路由 · 30s 自动刷新 · 冷却中的源会自动跳过")
+        _health = _pipeline_health()
+        if not _health:
+            st.info("等待首次探测（页面加载时已自动触发）...")
+        else:
+            # 按健康分排序展示
+            _sorted = sorted(_health.items(),
+                             key=lambda kv: -_health[kv[0]].get("健康分", 0))
+            for _name, _info in _sorted:
+                _score = _info.get("健康分", 0)
+                if _info.get("冷却中"):
+                    _ic, _color = "⏸️", "gray"
+                elif _score >= 0.8:
+                    _ic, _color = "🟢", "green"
+                elif _score >= 0.5:
+                    _ic, _color = "🟡", "orange"
+                else:
+                    _ic, _color = "🔴", "red"
+                st.markdown(f"{_ic} **{_name}** "
+                            f"<span style='color:{_color}'>健康分 {_score:.2f}</span>"
+                            f"　成功率 {_info.get('成功率','—')}　延迟 {_info.get('延迟','—')}"
+                            f"　完整率 {_info.get('完整率','—')}"
+                            f"　连败 {_info.get('连续失败', 0)}",
+                            unsafe_allow_html=True)
+
+            # 仓库状态
+            _wh = _warehouse_health()
+            if _wh.get("status") == "ok":
+                st.divider()
+                st.caption("📦 DuckDB 数仓")
+                _c1, _c2 = st.columns(2)
+                _c1.metric("快照条数", f"{_wh.get('spot_daily_rows', 0):,}")
+                _c2.metric("K线条数", f"{_wh.get('kline_daily_rows', 0):,}")
+                _c3, _c4 = st.columns(2)
+                _c3.metric("股票数", f"{_wh.get('kline_codes', 0):,}")
+                _c4.metric("文件大小", f"{_wh.get('db_size_mb', 0)} MB")
+                if _wh.get("spot_latest"):
+                    st.caption(f"最新快照时间：{_wh['spot_latest']}")
+            else:
+                st.caption(f"📦 数仓：{_wh.get('status', '未初始化')}（不影响选股，自动降级到 CSV）")
+
+# MAX_PRICE 已从 screen_service 导入，由 strategy_config.json 决定
 
 # ---------------- 历史推荐复盘（按需加载，避免云端启动时网络 hang 导致白屏） ----------------
 with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}批）", expanded=False):
@@ -448,6 +539,9 @@ if run:
             st.warning("有持仓需要处理，先处理持仓再考虑买新股。")
         st.markdown("---")
 
+    _run_t0 = time.time()                      # v1.24: 漏斗视图耗时基准
+    _spot_snapshot = get_spot_impl() if spot_fresh_enough() else None  # v1.24: 漏斗视图数据源
+
     bar = st.progress(0.0, text="正在全市场初筛...")
     cands = screen(MAX_PRICE)
     if len(cands) == 0:
@@ -481,14 +575,62 @@ if run:
         st.error(f"⚠️ 排雷：{len(mined)} 只候选股近7天有利空新闻，已自动排除——")
         for _, m in mined.iterrows():
             st.markdown(f"- **{m['名称']}（{m['代码']}）**：{m['利空标题']}")
-    # IC 门控：训练期组合 IC < IC_GATE → 信号弱到噪声级，今日空仓（与邮件推送同一口径）
+    # IC 门控：训练期组合 IC < IC_GATE → 信号弱到噪声级，今日空仓
     _ic_gate = float(res.attrs.get("ic_train_composite") or 0.0)
     if _ic_gate < IC_GATE:
         st.error(f"🚫 因子近期信号偏弱（训练期组合IC={_ic_gate:+.4f} < {IC_GATE}），"
                  "按规则今日空仓不选股。")
-        st.caption("这是风控开关：信号弱到噪声级时硬推票，期望收益不如空仓。每日邮件同一口径，今天也会跳过。")
+        st.caption("这是风控开关：信号弱到噪声级时硬推票，期望收益不如空仓。")
         st.stop()
-    ranked = pick_top3(res, min(len(res), 20))   # 评分前20作候选池，只数交给收益优化器
+
+    # ===== 三级漏斗视图（v1.24 新增：粗筛→验证→DL精筛 的可解释性）=====
+    with st.expander("🔻 三级漏斗可视化（v1.24）", expanded=False):
+        try:
+            from cascade_runner import CascadeRunner, CoarseScreener
+            # Stage1: 直接复用 verify_impl 之前的 snapshot 做粗筛（省一次联网）
+            _spot_snapshot = get_spot_impl() if _spot_snapshot is None else _spot_snapshot
+            if _spot_snapshot is not None and len(_spot_snapshot) > 100:
+                _s1 = CoarseScreener().screen(_spot_snapshot)
+                st.markdown("##### 漏斗总览")
+                _cols = st.columns(4)
+                _cols[0].metric("Stage1 输入", f"{_s1.input_count} 只")
+                _cols[1].metric("Stage1 通过", f"{_s1.passed_count} 只",
+                                f"通过率 {_s1.pass_rate:.0%}")
+                _cols[2].metric("Stage2 通过", f"{len(res)} 只 / 输入 {_s1.passed_count} 只")
+                _cols[3].metric("耗时", f"{time.time() - _run_t0:.1f}s")
+                st.caption(f"漏斗: {_s1.input_count} → {_s1.passed_count} → {len(res)} → {min(len(res), 20)}")
+
+                # Stage1 拒绝原因 Top
+                _rejects_by_cat: dict[str, list] = {}
+                for _, r in _s1.rejected:
+                    _rejects_by_cat.setdefault(r.category, []).append(r)
+                with st.expander(f"📋 Stage1 拒绝原因（{len(_s1.rejected)} 只）", expanded=False):
+                    for _cat, _list in sorted(_rejects_by_cat.items(),
+                                              key=lambda kv: -len(kv[1])):
+                        with st.expander(f"  • {_cat}（{len(_list)} 只）"):
+                            for _r in _list[:8]:
+                                st.caption(f"{_r.detail}")
+                            if len(_list) > 8:
+                                st.caption(f"... 还有 {len(_list)-8} 只")
+
+                # Stage2 拒绝原因（从 verify_impl 看 res 的 hists 和 trend_up 字段反推）
+                _failed_hists = [cd for cd, h in (res.attrs.get("hists") or {}).items()
+                                 if h is None or len(h) < 60]
+                _failed_trend = (res["趋势向上"] == False).sum() if "趋势向上" in res.columns else 0
+                _failed_fee = ((res["扣费总收益"] or 0) <= 0).sum() if "扣费总收益" in res.columns else 0
+                _failed_雷 = res["有雷"].sum() if "有雷" in res.columns else 0
+                with st.expander(f"📋 Stage2 拒绝原因（从 verify_impl 反推）", expanded=False):
+                    st.caption(f"  • 历史K线不足60根: {len(_failed_hists)} 只")
+                    st.caption(f"  • MA金叉不成立: {_failed_trend} 只")
+                    st.caption(f"  • 扣费回测收益 ≤ 0: {_failed_fee} 只")
+                    st.caption(f"  • 有近期利空公告: {_failed_雷} 只")
+                    st.caption("  完整的 Stage2 拒绝列表见 cascade_runner.py FactorVerifier")
+            else:
+                st.info("需要先有快照数据才能展示漏斗")
+        except Exception as _e:
+            st.caption(f"漏斗视图加载中...（{_e}）")
+
+    ranked = pick_top3(res, min(len(res), 20))
     if len(ranked) == 0:
         st.warning("今天没有股票通过回测+排雷验证。空仓也是一种操作，明天再来。")
         st.stop()
@@ -544,6 +686,67 @@ if run:
     elif cb_level >= 1:
         st.warning("🟡 已触发降半仓！建议实际买入金额为页面显示的一半。")
 
+    # ===== 专业统计诊断（v1.24 新增：胜率显著性 / IC稳定性 / VaR / 分布） =====
+    with st.expander("📐 专业统计诊断（v1.24）", expanded=False):
+        _win_sig = res.attrs.get("stats_win_sig") or {}
+        _stab = res.attrs.get("stats_factor_stab") or {}
+        _var = res.attrs.get("stats_var") or {}
+        _dist = res.attrs.get("stats_dist") or {}
+        _discount = res.attrs.get("stats_win_discount", 1.0)
+
+        if not _win_sig and not _stab:
+            st.caption("（本次未计算统计诊断，可能是候选太少或因子IC检验跳过）")
+        else:
+            # (a) 胜率显著性
+            c1, c2, c3, c4 = st.columns(4)
+            _p = _win_sig.get("p_value", 1.0)
+            _wilson = _win_sig.get("wilson_lower", 0)
+            _wrate = _win_sig.get("胜率", 0)
+            _trades = _win_sig.get("n", 0)
+            c1.metric("总交易笔数", f"{_trades} 笔")
+            c2.metric("回测胜率", f"{_wrate:.0%}")
+            c3.metric("Wilson下界", f"{_wilson:.0%}",
+                      help="95% 置信区间下界；>50% 才算真的比随机强")
+            c4.metric("p-value", f"{_p:.3f}",
+                      delta="显著" if _p < 0.05 else ("接近" if _p < 0.15 else "不显著"),
+                      help="二项分布精确检验；<0.05 才算统计上显著")
+            st.caption(f"→ {_win_sig.get('结论', '')}")
+            if _discount < 1.0:
+                st.caption(f"→ ⚠️ 本次因胜率不显著，对总分打了 {_discount:.0%} 折")
+
+            # (b) 因子稳定性
+            if _stab:
+                st.divider()
+                st.caption("🧬 因子稳定性（ICIR + 衰减率 · v1.24 新增）")
+                _stab_rows = []
+                for _f, _s in sorted(_stab.items(),
+                                     key=lambda kv: -(kv[1].get("icir", 0))):
+                    _stab_rows.append({
+                        "因子": _f,
+                        "IC均值": f"{_s.get('ic_mean', 0):+.3f}",
+                        "ICIR": f"{_s.get('icir', 0):.2f}",
+                        "衰减率": f"{_s.get('decay_ratio', 1):.0%}",
+                        "偏度": f"{_s.get('ic_skew', 0):+.2f}",
+                        "质量": _s.get("quality", "")[0],  # 星数
+                    })
+                st.dataframe(pd.DataFrame(_stab_rows), width="stretch", hide_index=True)
+                st.caption("ICIR = IC均值/IC标准差（≥1.5 极强，<0.5 不稳定）；衰减率 = 最近20天IC/全样本IC（<50% 因子正在失效）"
+                           "；权重已按稳定性自动惩罚（ICIR<0.5 或衰减<50% 的因子权重砍半）")
+
+            # (c) VaR + 分布
+            if _var:
+                st.divider()
+                v1, v2, v3, v4 = st.columns(4)
+                v1.metric("VaR(95%)", f"{_var.get('var_95', 0):.1%}",
+                          help="95% 概率下单日亏损不会超过这个数（历史分位数，不假设正态）")
+                v2.metric("CVaR(95%)", f"{_var.get('cvar_95', 0):.1%}",
+                          help="极端情况下的平均日亏损，比 VaR 更保守")
+                v3.metric("最大回撤", f"{_var.get('max_drawdown', 0):.1%}")
+                v4.metric("年化波动", f"{_var.get('annualized_vol', 0):.1%}")
+            if _dist:
+                st.caption(f"📊 分布形态：偏度 {_dist.get('skew', 0):+.2f} "
+                           f"峰度 {_dist.get('kurt', 0):+.2f} → {_dist.get('tail_type', '')}")
+
     # ---- 相关性过滤（v1.8 全开，带置信度折扣） ----
     if _USE_CORR_FILTER:
         try:
@@ -553,6 +756,10 @@ if run:
         except Exception:
             pass
     plan, n_final = best_plan(ranked, float(capital))
+    if len(plan) == 0:
+        st.warning(f"所有候选股的买入金额都超过了本金 {capital:.0f} 元，"
+                   "自动将最低 1 手下限放宽。可以：① 增加本金 ② 等到低价股出现 ③ 手动在持仓.csv 里买入。")
+        st.stop()
     leftover = float(capital) - float(plan["投入(含佣金)"].sum())
 
     # ---- 汇总指标：总投入 / 期望收益 / 整体盈利概率 ----

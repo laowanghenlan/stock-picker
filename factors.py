@@ -39,7 +39,7 @@ ALL_FACTOR_COLS = FACTOR_COLS + FUND_FACTORS
 # 以下参数优先读 strategy_config.json，读不到用默认值（v1.4 上线时的硬编码）
 IC_MIN = float(_cfg().get("因子", {}).get("IC门槛", 0.03))
 IC_AVG_N = 20        # 用最近20个交易日的截面IC均值定权（降权重抖动）
-FWD_DAYS = 5         # 检验因子对未来5日收益的预测力
+FWD_DAYS = int(_cfg().get("因子", {}).get("FWD_DAYS", 5))   # 检验因子对未来N日收益的预测力（config可调）
 WARMUP = 60          # 前60根K线不参与采样（保证因子窗口完整）
 MIN_XSEC = 15        # 单个交易日截面至少15只股票才算IC
 MIN_IND = 3          # 同行业至少3只才做组内中性化，否则退回全截面
@@ -187,28 +187,56 @@ def ic_summary(ics: pd.DataFrame) -> tuple:
     return ic, ir
 
 
-def cap_weights(w: dict, n: int | None = None) -> dict:
+def _fund_reserve(top: list, w: dict, fund_reserve: int) -> list:
+    """在截断后的 top 里，用未入选、方向为正的财务因子替换 |权重| 最小的非财务因子，
+    直到正向财务因子数达到 fund_reserve 或没有可替换的候选。
+    动机：净利润增速/营收增速等财务因子训练IC常稳定为正，却因 |IC| 偏小被价格因子挤出。"""
+    chosen = dict(top)
+    n_fund = sum(1 for f, v in chosen.items() if f in FUND_FACTORS and v > 0)
+    # 未入选、方向为正的财务候选，按 |权重| 降序（w 符号 = 训练IC符号）
+    cands = sorted(((f, v) for f, v in w.items()
+                    if f in FUND_FACTORS and v > 0 and f not in chosen),
+                   key=lambda kv: abs(kv[1]), reverse=True)
+    for f, v in cands:
+        if n_fund >= fund_reserve:
+            break
+        non_fund = [(cf, cv) for cf, cv in chosen.items() if cf not in FUND_FACTORS]
+        if not non_fund:
+            break
+        worst = min(non_fund, key=lambda kv: abs(kv[1]))
+        del chosen[worst[0]]
+        chosen[f] = v
+        n_fund += 1
+    return list(chosen.items())
+
+
+def cap_weights(w: dict, n: int | None = None, fund_reserve: int = 0) -> dict:
     """只保留 |权重| 最大的前 n 个因子并重新归一化（n 默认取 MAX_FACTORS）。
-    因子普遍弱且每期轮换时，多保留因子等于把噪声一起加权，会稀释有效信号。"""
+    因子普遍弱且每期轮换时，多保留因子等于把噪声一起加权，会稀释有效信号。
+    fund_reserve>0 时，在截断结果里至少保留 fund_reserve 个方向为正的财务因子，
+    防止稳定但 |IC| 偏小的财务质量因子被纯价格因子挤出名额（默认0=不改变行为）。"""
     limit = MAX_FACTORS if n is None else int(n)
     if limit <= 0 or len(w) <= limit:
         return dict(w)
     top = sorted(w.items(), key=lambda kv: abs(kv[1]), reverse=True)[:limit]
+    if fund_reserve > 0:
+        top = _fund_reserve(top, w, fund_reserve)
     s = sum(abs(v) for _, v in top)
     return {f: v / s for f, v in top} if s > 0 else {}
 
 
-def ic_weights(ic: dict, keep: set | None = None) -> dict:
+def ic_weights(ic: dict, keep: set | None = None, fund_reserve: int = 0) -> dict:
     """|IC|<门槛剔除；剩余按 |IC| 归一化，保留符号（负IC=反转因子）。
     keep: 相关性去冗余后允许保留的因子集合（None=不剔除）。
     最后截断到 MAX_FACTORS 个，避免弱因子噪声稀释信号。
-    注：曾试过按 ICIR 排序选因子，样本外未通过（见 validate 记录），故仍按 |IC|。"""
+    注：曾试过按 ICIR 排序选因子，样本外未通过（见 validate 记录），故仍按 |IC|。
+    fund_reserve: 给方向为正的财务因子预留的名额（默认0，仅验证脚本实验用）。"""
     valid = {f: v for f, v in ic.items() if abs(v) >= IC_MIN}
     if keep is not None:
         valid = {f: v for f, v in valid.items() if f in keep}
     s = sum(abs(v) for v in valid.values())
     w = {f: v / s for f, v in valid.items()} if s > 0 else {}
-    return cap_weights(w)
+    return cap_weights(w, fund_reserve=fund_reserve)
 
 
 def prune_correlated(npanel: pd.DataFrame, ic: dict,

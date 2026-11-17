@@ -52,18 +52,9 @@ import pandas as pd                                             # noqa: E402
 import screen_service as app  # 复用选股引擎（无 Streamlit 依赖）  # noqa: E402
 
 
-def _load_capital() -> float:
-    """本金读取优先级：仓库 推荐设置.json 的 capital > 环境变量 CAPITAL > 2200。
-    GitHub Actions checkout 出来的代码自带 推荐设置.json，直接读本地文件即可；
-    网页保存本金后，第二天邮件自动按新本金计算（与 web 端共用同一份设置）。"""
-    try:
-        settings_file = Path(__file__).parent / "推荐设置.json"   # 字段含义：capital=本金（元）
-        return float(json.loads(settings_file.read_text(encoding="utf-8"))["capital"])
-    except Exception:
-        return float(os.environ.get("CAPITAL", "2200"))
-
-
-CAPITAL = _load_capital()                             # 本金（元），web 与邮件统一来源
+# 本金（元）：与 web 端共用 screen_service.load_settings()，优先级 推荐设置.json > 环境变量 CAPITAL，
+# 网页改本金后第二天邮件自动按新本金计算，不再在邮件端写死。
+CAPITAL = app.load_settings()["capital"]
 TO_ADDR = os.environ["QQ_EMAIL"]                        # 收件邮箱（与发件邮箱相同）
 AUTH_CODE = os.environ["QQ_AUTH_CODE"]                  # QQ邮箱SMTP授权码（Web Secrets 或本地环境变量）
 LOG_FILE = Path(__file__).parent / "推送记录.csv"       # 推送留档，供周末复盘用

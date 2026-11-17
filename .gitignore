@@ -13,3 +13,6 @@ __pycache__/
 fundamental_cache/hist/
 # 滚动样本外验证的行情缓存（体积大，可随时重下）
 wf_cache/
+# 本地 DuckDB 数仓（体积大，可由数据管道重建）
+*.duckdb
+*.duckdb.wal

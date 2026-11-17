@@ -2,6 +2,7 @@
 网页（app.py）与每日邮件（daily_push.py）共用本模块，保证同一口径。"""
 import datetime as dt
 import json
+import os
 import time
 from pathlib import Path
 
@@ -74,19 +75,28 @@ def lhb_codes_impl() -> set:
 
 HOLDINGS_FILE = Path(__file__).parent / "持仓.csv"
 
-# ---------------- 推荐设置（本金默认值，存仓库文件，网页与每日邮件共用） ----------------
+# ---------------- 推荐设置（本金存仓库文件，网页与每日邮件共用，不写死） ----------------
 SETTINGS_FILE = Path(__file__).parent / "推荐设置.json"
 # 字段含义：capital = 本金（元）。JSON 不支持注释，含义写在这里
-DEFAULT_SETTINGS = {"capital": 2200}
+# 兜底本金：仅在 推荐设置.json 缺失/损坏 且未设置环境变量 CAPITAL 时使用（通用值，不绑定个人账户）
+DEFAULT_CAPITAL = 10000.0
 
 
 def load_settings() -> dict:
-    """读取本地仓库里的 推荐设置.json，返回 dict；文件缺失/损坏时返回默认值 {"capital": 2200}"""
+    """本金优先级：推荐设置.json > 环境变量 CAPITAL > DEFAULT_CAPITAL。
+    网页输入框与每日邮件读同一份设置，改一处两边同步。"""
+    cap = None
     try:
         data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-        return {"capital": float(data.get("capital", DEFAULT_SETTINGS["capital"]))}
+        cap = float(data["capital"])
     except Exception:
-        return dict(DEFAULT_SETTINGS)
+        cap = None
+    if not cap or cap <= 0:
+        try:
+            cap = float(os.environ.get("CAPITAL") or DEFAULT_CAPITAL)
+        except (TypeError, ValueError):
+            cap = DEFAULT_CAPITAL
+    return {"capital": cap}
 
 
 def load_holdings() -> pd.DataFrame:
@@ -216,6 +226,7 @@ def best_plan(ranked: pd.DataFrame, capital: float):
     预期收益 = 各票扣费回测收益% × 实际买入金额；摩擦含最低5元佣金
     （本金越小固定佣金越吃亏，最优只数自然越少；候选越多收益越高，只数自然越多）。
     v1.8: 从 ranked.attrs 取 n_done / hists，传给 allocate 做均值方差优化。
+    v1.24: 加空 plan 守卫，allocate 全部候选买不起 1 手时返回空 df → 跳过。
     返回 (买入方案, 最优只数)。"""
     ret_map = ranked.set_index("代码")["扣费总收益"]
     n_done = int(ranked.attrs.get("n_done", 0) or 0)
@@ -223,6 +234,8 @@ def best_plan(ranked: pd.DataFrame, capital: float):
     best_df, best_n, best_net = None, 0, -1e18
     for n in range(1, min(len(ranked), 20) + 1):
         plan, _left = allocate(ranked.head(n), capital, n_done=n_done, hists=hists)
+        if plan is None or len(plan) == 0 or "买入股数" not in plan.columns:
+            continue   # allocate 全部买不起 1 手 → 跳过这个只数
         amt = plan["买入股数"] * plan["现价"]
         gross = float((amt * plan["代码"].map(ret_map) / 100).sum())
         buy_fee = float((plan["投入(含佣金)"] - amt).sum())
@@ -230,11 +243,15 @@ def best_plan(ranked: pd.DataFrame, capital: float):
         net = gross - buy_fee - sell_fee
         if net > best_net:
             best_df, best_n, best_net = plan, n, net
+    # 兜底：全部 n 都买不起时，返回空 df + n=0
+    if best_df is None:
+        return pd.DataFrame(), 0
     return best_df, best_n
 
 
 # ---------------- 固定参数（本金由页面输入，其余固化在后台） ----------------
-MIN_PRICE = 2.0         # 股价下限：避开1元股退市风险区
+MIN_PRICE = 10.0         # 股价下限（初值，后面从 config 覆盖）
+MAX_PRICE = 30.0         # 股价上限（初值，后面从 config 覆盖）
 CANDIDATES = 15         # 初筛后进入回测验证的候选数量
 PICKS = 3               # 最终输出股票数（兜底默认值，实际只数由 auto_pick_count(本金) 决定）
 HISTORY_DAYS = 500      # 回测用的历史天数
@@ -256,6 +273,11 @@ import json  # noqa: E402
 _cfg_pool = _cfg().get("候选池", {})
 CANDIDATES = int(_cfg_pool.get("网页端", CANDIDATES))
 CANDIDATES_PUSH = int(_cfg_pool.get("邮件推送", CANDIDATES))
+
+# 价格区间：改 strategy_config.json 的「价格区间」即可换价格带
+_price_cfg = _cfg().get("价格区间", {})
+MIN_PRICE = float(_price_cfg.get("下限", MIN_PRICE))
+MAX_PRICE = float(_price_cfg.get("上限", MAX_PRICE))
 
 _risk = _cfg().get("风控", {})
 _ml_cfg = _cfg().get("机器学习", {})
@@ -624,9 +646,7 @@ def screen_impl(max_price: float | None = None) -> pd.DataFrame:
     """第一步：从全市场快照里做硬性初筛，只留下安全、买得起、流动性够的股票。
     （无缓存装饰器，供裸运行脚本直接调用）"""
     if max_price is None:
-        _cap = float(load_settings()["capital"])
-        _n = auto_pick_count(_cap)
-        max_price = max(MIN_PRICE + 0.5, min(50.0, _cap / (_n * 100) * 0.95))
+        max_price = MAX_PRICE
     df = get_spot_impl()                                 # 内部调用走 _impl，避免嵌套缓存
     df = df.copy()
     df["代码"] = df["代码"].astype(str).str.zfill(6)
@@ -936,12 +956,68 @@ def verify_impl(cands: pd.DataFrame, progress,
     res.attrs["cb_level"], res.attrs["cb_msg"], res.attrs["cb_diag"] = cb_level, cb_msg, cb_diag
     res.attrs["n_done"] = int(n_done)          # v1.8: 置信度折扣用
     res.attrs["hists"] = hists                  # v1.8: 均值方差优化用
+
+    # ========== L3 专业统计门禁（v1.24 新增） ==========
+    try:
+        import statistics_kit as stkit
+        # (a) 回测胜率显著性检验（全样本）
+        if len(res) > 0 and "卖出笔数" in res.columns and "胜率" in res.columns:
+            total_trades = int(res["卖出笔数"].sum())
+            total_wins = int((res["胜率"] / 100 * res["卖出笔数"]).sum())
+            win_sig = stkit.win_rate_significance(total_wins, total_trades)
+            res.attrs["stats_win_sig"] = win_sig
+        # (b) 因子稳定性检验（每个因子的 IC 序列 → ICIR + 衰减率）
+        if "ic" in res.attrs and res.attrs["ic"]:
+            ics = factors.ic_series(npanel) if "npanel" in locals() else None
+            if ics is not None:
+                stab_per_factor = {}
+                for col in res.attrs["ic"].keys():
+                    if col in ics.columns:
+                        stab_per_factor[col] = stkit.factor_stability(ics[col])
+                res.attrs["stats_factor_stab"] = stab_per_factor
+                # 稳定性惩罚：权重 *= min(1.5, icir / max(decay, 0.5))
+                # ICIR < 0.5 或衰减率 < 0.5 的因子，权重砍半
+                if final_icw and stab_per_factor:
+                    stab_penalized = {}
+                    for f, w in final_icw.items():
+                        s = stab_per_factor.get(f, {})
+                        icir_s = s.get("icir", 0.5)
+                        decay_s = s.get("decay_ratio", 1.0)
+                        stab_factor = min(1.5, max(0.3,
+                                                     icir_s / max(0.5, icir_s)
+                                                     * min(1.0, max(decay_s, 0.3))))
+                        stab_penalized[f] = w * stab_factor
+                    # 重新归一化
+                    total_w = sum(abs(v) for v in stab_penalized.values()) or 1.0
+                    stab_penalized = {f: v / total_w for f, v in stab_penalized.items()}
+                    res.attrs["ic_weights"] = stab_penalized
+                    final_icw = stab_penalized
+        # (c) 历史 VaR + 分布诊断（取第一只票的 hists 做 proxy，或全组均值）
+        var_info = {}
+        if hists:
+            all_returns = []
+            for cd, hh in list(hists.items())[:30]:
+                try:
+                    ret = hh["收盘"].pct_change().dropna()
+                    all_returns.append(ret)
+                except Exception:
+                    continue
+            if all_returns:
+                combined = pd.concat(all_returns)
+                var_info = stkit.historical_var(combined)
+                dist_info = stkit.return_distribution(combined)
+                res.attrs["stats_var"] = var_info
+                res.attrs["stats_dist"] = dist_info
+    except Exception:
+        pass   # 统计失败不影响主流程
+
     return res
 
 
 def pick_top3(res: pd.DataFrame, n: int = PICKS) -> pd.DataFrame:
     """第三步：综合打分。
-    扣费收益占大头，胜率其次，趋势向上是必须条件（不满足扣大分）。"""
+    扣费收益占大头，胜率其次，趋势向上是必须条件（不满足扣大分）。
+    v1.24：引入统计折扣（胜率不显著时对总分打折，避免把随机噪声当信号）。"""
     res = res.copy()
     # 百分位打分（0~100），避免不同量纲直接相加
     res["收益分"] = res["扣费总收益"].rank(pct=True) * 100
@@ -965,6 +1041,17 @@ def pick_top3(res: pd.DataFrame, n: int = PICKS) -> pd.DataFrame:
     # L2 机器学习加分：ML分为当日截面百分位(0~1)，缺失按中位数0.5处理；未通过样本外IC则无此列
     if ML_WEIGHT > 0 and "ML分" in res.columns and res["ML分"].notna().any():
         res["总分"] = (1 - ML_WEIGHT) * res["总分"] + ML_WEIGHT * res["ML分"].fillna(0.5) * 100
+    # L3 统计折扣（v1.24）：胜率不显著时对总分打折 0.7~0.9
+    win_sig = res.attrs.get("stats_win_sig") or {}
+    p_val = win_sig.get("p_value", 1.0)
+    if p_val < 0.05:
+        discount = 1.0
+    elif p_val < 0.15:
+        discount = 0.9
+    else:
+        discount = 0.7
+    res["总分"] *= discount
+    res.attrs["stats_win_discount"] = discount
     res = res.sort_values("总分", ascending=False)
     # 只保留扣费后还能赚钱、且近7天无利空新闻的股票
     res = res[(res["扣费总收益"] > 0) & (~res["有雷"])]
