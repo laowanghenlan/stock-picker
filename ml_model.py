@@ -9,6 +9,7 @@
 """
 import numpy as np
 import pandas as pd
+from pathlib import Path
 
 import factors
 
@@ -17,6 +18,8 @@ MIN_DATES = 40          # 最少交易日数
 EMBARGO = factors.FWD_DAYS   # 训练/验证之间留5日，防止5日收益标签跨段重叠
 OOF_IC_MIN = 0.02       # 样本外IC低于此值不给分
 LABEL_CLIP = 0.5        # 标签裁剪到±50%，避免单次暴涨暴跌主导训练
+
+MODEL_DIR = Path(__file__).parent / "models"   # 预训练模型落盘目录（随仓库分发，云端免训练）
 
 
 def _label_of(npanel: pd.DataFrame) -> tuple[str, float]:
@@ -115,16 +118,62 @@ def predict_scores(fitted: dict, today: pd.DataFrame) -> pd.Series:
     return pd.Series(fitted["_model"].predict(X), index=today.index, dtype=float)
 
 
+def save_model(fitted: dict, name: str = "lgb") -> Path:
+    """把训练好的模型落盘到 models/，供云端直接加载推理（免训练）。"""
+    if fitted is None:
+        raise ValueError("fitted is None")
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    import joblib
+    fitted["_pretrained"] = True
+    path = MODEL_DIR / f"{name}.joblib"
+    joblib.dump(fitted, path, compress=3)
+    return path
+
+
+def load_model(name: str = "lgb") -> dict | None:
+    """加载预训练模型；文件不存在或加载失败返回 None。"""
+    path = MODEL_DIR / f"{name}.joblib"
+    if not path.exists():
+        return None
+    try:
+        import joblib
+        fitted = joblib.load(path)
+        # 验证特征列齐全
+        if "features" not in fitted or "_model" not in fitted:
+            return None
+        return fitted
+    except Exception:
+        return None
+
+
 def train_predict(npanel: pd.DataFrame, today: pd.DataFrame,
-                  feature_cols: list[str] | None = None) -> dict | None:
-    """训练并预测当日截面；样本外IC不达标时仍返回诊断，但上层不给分。"""
+                  feature_cols: list[str] | None = None,
+                  use_pretrained: bool = True) -> dict | None:
+    """训练并预测当日截面；样本外IC不达标时仍返回诊断，但上层不给分。
+
+    use_pretrained=True 时优先加载 models/lgb.joblib（本地预训练的全市场模型），
+    避免云端因候选股样本太少导致 IC 为负。模型不存在则现场训练。
+    """
     if len(today) == 0:
         return None
     feats = feature_cols or [f + "_n" for f in factors.ALL_FACTOR_COLS
                              if f + "_n" in npanel.columns and f + "_n" in today.columns]
-    fitted = fit_model(npanel, feats)
+
+    fitted = None
+    if use_pretrained:
+        fitted = load_model("lgb")
+        # 预训练模型的特征列必须与 today 对齐，否则退回现场训练
+        if fitted is not None:
+            missing = [f for f in fitted["features"] if f not in today.columns]
+            if missing:
+                fitted = None
+
     if fitted is None:
-        return None
+        fitted = fit_model(npanel, feats)
+        if fitted is None:
+            return None
+
     scores = predict_scores(fitted, today).rank(pct=True)
     return {**{k: v for k, v in fitted.items() if k != "_model"},
-            "scores": dict(zip(today["代码"].astype(str), scores.round(4)))}
+            "scores": dict(zip(today["代码"].astype(str), scores.round(4))),
+            "pretrained": use_pretrained and fitted.get("_pretrained", False)}

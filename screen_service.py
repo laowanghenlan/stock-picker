@@ -863,8 +863,12 @@ def verify_impl(cands: pd.DataFrame, progress,
     res.attrs["news_failed"] = news_failed      # 舆情取数失败、风险无法核实而被剔除的候选
     res.attrs["n_cands"] = total
     # 因子IC检验：行业中性化 → 逐交易日横截面IC → 最近20日均值定权
+    # 因子IC检验：优先用 wf_cache 全市场大面板（数百只×近千日，IC/ML更稳定），
+    # 无缓存时退回候选股面板（云端/首次运行）
     try:
-        npanel = factors.neutralize(factors.build_panel(hists, meta, fundamentals=fundamentals))
+        npanel = factors.build_training_panel()
+        if npanel is None or len(npanel) == 0:
+            npanel = factors.neutralize(factors.build_panel(hists, meta, fundamentals=fundamentals))
         ics = factors.ic_series(npanel)
         ic, ir = factors.ic_summary(ics)
         ic_all = dict(ic)                               # 全量IC（落盘监控用，不剔除冗余）

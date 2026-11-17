@@ -26,6 +26,37 @@ import numpy as np
 import pandas as pd
 
 HERE = Path(__file__).parent
+MODEL_DIR = HERE / "models"   # 预训练模型落盘目录（随仓库分发，云端免训练）
+
+
+def save_sklearn_model(model, features: list[str], ic: float, name: str) -> Path:
+    """把 sklearn 模型（ET/MLP）连同特征列和IC落盘，供云端直接加载推理。"""
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    import joblib
+    payload = {
+        "_model": model,
+        "features": list(features),
+        "oof_ic": float(ic) if ic == ic else float("nan"),
+        "_pretrained": True,
+    }
+    path = MODEL_DIR / f"{name}.joblib"
+    joblib.dump(payload, path, compress=3)
+    return path
+
+
+def load_sklearn_model(name: str) -> dict | None:
+    """加载预训练 sklearn 模型；文件不存在或加载失败返回 None。"""
+    path = MODEL_DIR / f"{name}.joblib"
+    if not path.exists():
+        return None
+    try:
+        import joblib
+        payload = joblib.load(path)
+        if "features" not in payload or "_model" not in payload:
+            return None
+        return payload
+    except Exception:
+        return None
 
 
 # =============================================================
@@ -347,6 +378,7 @@ class DeepRefiner:
 
         # 2a. LightGBM（已存在的 ml_model；主流程复用 L2 分数时跳过训练）
         model_ic: dict[str, float] = {}
+        self._lgb_pretrained = False
         if lgb_scores is not None:
             if lgb_scores:
                 predictions["lgb"] = lgb_scores
@@ -360,31 +392,32 @@ class DeepRefiner:
                     model_ic["lgb"] = ic
                     if sc:
                         predictions["lgb"] = sc
-                        model_loaded.append(f"lgb({backend})")
+                        suffix = "(预训练)" if getattr(self, "_lgb_pretrained", False) else ""
+                        model_loaded.append(f"lgb({backend}{suffix})")
             except Exception as e:
                 model_err["lgb"] = f"{type(e).__name__}: {e}"[:160]
                 print(f"[Cascade Stage3] lgb 跳过: {e}")
 
-        # 2b. ExtraTrees（sklearn）— 样本外IC达标才参与
+        # 2b. ExtraTrees（sklearn）— 优先用本地预训练模型，无则现场训练+IC门禁
         try:
-            sc, ic = self._predict_via_sklearn("et", today_panel, candidates, _factors)
+            sc, ic = self._predict_sklearn("et", today_panel, candidates, _factors)
             model_ic["et"] = ic
             if sc:
                 predictions["et"] = sc
-                model_loaded.append("et")
+                model_loaded.append(f"et{'(预训练)' if getattr(self, '_et_pretrained', False) else ''}")
             else:
                 model_err["et"] = "样本外IC未达标或无有效训练数据" if ic == ic else "样本外IC无法计算"
         except Exception as e:
             model_err["et"] = f"{type(e).__name__}: {e}"[:160]
             print(f"[Cascade Stage3] et 跳过: {e}")
 
-        # 2c. MLP（sklearn.neural_network）— 样本外IC达标才参与
+        # 2c. MLP（sklearn.neural_network）— 优先用本地预训练模型，无则现场训练+IC门禁
         try:
-            sc, ic = self._predict_via_sklearn("mlp", today_panel, candidates, _factors)
+            sc, ic = self._predict_sklearn("mlp", today_panel, candidates, _factors)
             model_ic["mlp"] = ic
             if sc:
                 predictions["mlp"] = sc
-                model_loaded.append("mlp")
+                model_loaded.append(f"mlp{'(预训练)' if getattr(self, '_mlp_pretrained', False) else ''}")
             else:
                 model_err["mlp"] = "样本外IC未达标或无有效训练数据" if ic == ic else "样本外IC无法计算"
         except Exception as e:
@@ -448,22 +481,25 @@ class DeepRefiner:
 
     def _predict_via_ml(self, ml_mod, panel: pd.DataFrame,
                         candidates: pd.DataFrame) -> tuple[dict[str, float], float]:
-        """用现有 ml_model 预测。返回 (分数, 样本外IC)；IC 未达标时分数为空（模型弃权）。"""
+        """用现有 ml_model 预测。返回 (分数, 样本外IC)；IC 未达标时分数为空（模型弃权）。
+
+        优先加载本地预训练 LightGBM（models/lgb.joblib），避免云端样本太少导致IC为负。
+        """
         if panel is None or len(panel) == 0:
             return {}, float("nan")
-        feats = [f + "_n" for f in __import__("factors").ALL_FACTOR_COLS
-                 if f + "_n" in panel.columns]
         today = panel[panel["代码"].isin(candidates["代码"].astype(str).str.zfill(6))].copy()
         if len(today) < 3:
             return {}, float("nan")
-        fitted = ml_mod.fit_model(panel, feats)
-        if fitted is None:
+        result = ml_mod.train_predict(panel, today, use_pretrained=True)
+        if result is None:
             return {}, float("nan")
-        oof_ic = float(fitted.get("oof_ic", float("nan")))
-        if not fitted.get("oof_pass"):
+        oof_ic = float(result.get("oof_ic", float("nan")))
+        oof_pass = result.get("oof_pass", False)
+        self._lgb_pretrained = result.get("pretrained", False)
+        if not oof_pass:
             return {}, oof_ic
-        scores = ml_mod.predict_scores(fitted, today).rank(pct=True)
-        return dict(zip(today["代码"].astype(str).str.zfill(6), scores.round(4))), oof_ic
+        scores = result.get("scores", {})
+        return scores, oof_ic
 
     @staticmethod
     def _new_sklearn_model(model_type: str, et_cls, mlp_cls):
@@ -486,52 +522,72 @@ class DeepRefiner:
                 ics.append(g["p"].rank().corr(g["y"].rank()))
         return float(np.nanmean(ics)) if ics else float("nan")
 
-    def _predict_via_sklearn(self, model_type: str, panel: pd.DataFrame,
-                             candidates: pd.DataFrame, factors_mod,
-                             min_ic: float = 0.02) -> tuple[dict[str, float], float]:
-        """sklearn 的 ExtraTrees / MLP 模型。
+    def _predict_sklearn(self, model_type: str, panel: pd.DataFrame,
+                         candidates: pd.DataFrame, factors_mod,
+                         min_ic: float = 0.02) -> tuple[dict[str, float], float]:
+        """ET/MLP 预测入口：优先加载本地预训练模型，无则现场训练+IC门禁。"""
+        pretrained = load_sklearn_model(model_type)
+        setattr(self, f"_{model_type}_pretrained", pretrained is not None)
+        if pretrained is not None:
+            feats = pretrained["features"]
+            missing = [f for f in feats if f not in panel.columns]
+            if missing:
+                print(f"[Cascade Stage3] {model_type} 预训练特征缺失 {missing[:3]}，退回现场训练")
+                setattr(self, f"_{model_type}_pretrained", False)
+            else:
+                today = panel.groupby("代码").tail(1).copy()
+                if len(today) > 0:
+                    Xt = today[feats].astype(float).fillna(0.0).values
+                    scores = pd.Series(pretrained["_model"].predict(Xt),
+                                       index=today.index).rank(pct=True)
+                    ic = float(pretrained.get("oof_ic", float("nan")))
+                    return dict(zip(today["代码"].astype(str).str.zfill(6),
+                                    scores.round(4))), ic
+        return self._predict_via_sklearn(model_type, panel, candidates, factors_mod, min_ic)
 
-        与 LightGBM 同一套准入纪律（v1.25）：
-        - 标签优先用横截面超额排名（剥离大盘beta），缺失时退回原始5日收益
-        - 按日期切分最后20%做样本外验证，训练/验证之间留 FWD_DAYS 天 embargo
-        - 样本外横截面秩相关 IC < min_ic → 返回空预测，该模型不参与精筛（绝不拿噪声砍股票）
+    def train_sklearn_model(self, model_type: str, panel: pd.DataFrame,
+                            factors_mod, min_ic: float = 0.02
+                            ) -> tuple[object, list[str], float]:
+        """训练 sklearn ET/MLP 模型并过 IC 门禁。
+
+        返回 (model, features, oof_ic)；IC 不达标时 model 为 None。
+        预训练脚本和现场推理共用同一套准入纪律。
         """
         from sklearn.ensemble import ExtraTreesRegressor
         from sklearn.neural_network import MLPRegressor
 
         if panel is None or len(panel) < 100:
-            return {}, float("nan")
+            return None, [], float("nan")
         feats = [f + "_n" for f in factors_mod.ALL_FACTOR_COLS
                  if f + "_n" in panel.columns]
         feats = [f for f in feats if panel[f].notna().mean() > 0.3]
         if len(feats) < 3:
-            return {}, float("nan")
+            return None, [], float("nan")
 
         label_col = getattr(factors_mod, "EXCESS_RANK_COL", None)
         if label_col is None or label_col not in panel.columns \
                 or panel[label_col].notna().mean() < 0.5:
             label_col = getattr(factors_mod, "LABEL_COL", "未来5日收益")
         if label_col not in panel.columns:
-            return {}, float("nan")
+            return None, [], float("nan")
 
         df = panel[feats + [label_col, "日期", "代码"]].dropna(subset=[label_col]).copy()
         if len(df) < 100:
-            return {}, float("nan")
+            return None, [], float("nan")
         df["日期"] = pd.to_datetime(df["日期"])
         df = df.sort_values("日期")
         X = df[feats].astype(float).fillna(0.0).values
         y = df[label_col].astype(float).clip(-0.5, 0.5).values
 
-        # 样本外验证（按日期切分 + embargo，避免 5 日标签跨段重叠）
         dates = np.array(sorted(df["日期"].unique()))
         if len(dates) < 30:
-            return {}, float("nan")
+            return None, [], float("nan")
         split = int(len(dates) * 0.8)
         embargo = int(getattr(factors_mod, "FWD_DAYS", 5))
         tr_mask = df["日期"].isin(dates[:max(1, split - embargo)]).values
         va_mask = df["日期"].isin(dates[split:]).values
         if va_mask.sum() < 50:
-            return {}, float("nan")
+            return None, [], float("nan")
         probe = self._new_sklearn_model(model_type, ExtraTreesRegressor, MLPRegressor)
         probe.fit(X[tr_mask], y[tr_mask])
         oof_ic = self._cross_sectional_ic(
@@ -539,11 +595,23 @@ class DeepRefiner:
             min_xsec=int(getattr(factors_mod, "MIN_XSEC", 15)))
         if not (oof_ic == oof_ic) or oof_ic < min_ic:
             print(f"[Cascade Stage3] {model_type} 样本外IC={oof_ic:.3f} < {min_ic}，弃权")
-            return {}, oof_ic
+            return None, feats, oof_ic
 
-        # 通过门禁后，用全部历史重训再预测当日候选
+        # 通过门禁后，用全部历史重训
         model = self._new_sklearn_model(model_type, ExtraTreesRegressor, MLPRegressor)
         model.fit(X, y)
+        return model, feats, oof_ic
+
+    def _predict_via_sklearn(self, model_type: str, panel: pd.DataFrame,
+                             candidates: pd.DataFrame, factors_mod,
+                             min_ic: float = 0.02) -> tuple[dict[str, float], float]:
+        """sklearn 的 ExtraTrees / MLP 模型现场训练 + 预测。"""
+        model, feats, oof_ic = self.train_sklearn_model(
+            model_type, panel, factors_mod, min_ic)
+        if model is None:
+            return {}, oof_ic
+        df = panel[feats + ["日期", "代码"]].dropna(subset=feats, how="all").copy()
+        df["日期"] = pd.to_datetime(df["日期"])
         today = df.groupby("代码").tail(1).copy()
         if len(today) == 0:
             return {}, oof_ic
