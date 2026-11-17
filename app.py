@@ -400,15 +400,10 @@ with st.sidebar:
 
     # ---------------- 数据源健康仪表盘 ----------------
     with st.expander("🔧 数据源健康", expanded=False):
-        # 静默刷新：距离上次更新 > 30 秒就重新抓一次健康度（只读内存，不联网）
-        _now = time.time()
-        _last = st.session_state.get("_health_last_update", 0)
-        _needs_refresh = _now - _last > 30
-        if _needs_refresh:
-            st.session_state["_health_last_update"] = _now
-            st.rerun()
-
-        st.caption("多源动态路由 · 30s 自动刷新 · 冷却中的源会自动跳过")
+        # 不做 st.rerun() 定时刷新：脚本先跑侧边栏再跑按钮，rerun 会中断脚本并吞掉
+        # 「今日选股」的点击状态（2026-11-17 实测：点击后页面无反应）。健康度是内存实时值，
+        # 任何页面交互都会重跑脚本并读到最新数据，无需主动刷新。
+        st.caption("多源动态路由 · 健康度随页面操作自动更新 · 冷却中的源会自动跳过")
         _health = _pipeline_health()
         if not _health:
             st.info("等待首次探测（页面加载时已自动触发）...")
