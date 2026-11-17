@@ -283,6 +283,7 @@ _risk = _cfg().get("风控", {})
 _ml_cfg = _cfg().get("机器学习", {})
 ML_ENABLED = bool(_ml_cfg.get("启用", True))            # LightGBM加分项总开关
 ML_WEIGHT = max(0.0, min(0.5, float(_ml_cfg.get("权重", 0.20))))   # 占总分比例，上限50%
+ML_ENSEMBLE_ENABLED = bool(_ml_cfg.get("集成精筛", True))  # Stage3 三模型集成精筛总开关
 STOP_LOSS_PCT = float(_risk.get("止损%", 0.05))
 TAKE_PROFIT_PCT = float(_risk.get("止盈%", 0.10))
 STOP_LOSS_PCT = STOP_LOSS_PCT  # 用 config 的覆盖
@@ -899,6 +900,8 @@ def verify_impl(cands: pd.DataFrame, progress,
                     res["ML分"] = res["代码"].astype(str).map(ml["scores"])
         except Exception as _e:
             res.attrs["ml"] = {"error": str(_e)[:80]}
+    # Stage3 精筛复用同一份训练面板，避免重复构建（pick_top3 里通过 attrs 读取）
+    res.attrs["npanel"] = npanel if "npanel" in locals() else None
     # 基础权重（历史IC；因子截断按 |IC|）
     base_icw = factors.ic_weights(res.attrs.get("ic") or {})
 
@@ -1014,6 +1017,62 @@ def verify_impl(cands: pd.DataFrame, progress,
     return res
 
 
+def ensemble_refine(res: pd.DataFrame) -> pd.DataFrame:
+    """Stage3 三模型集成精筛：LightGBM(复用L2分数，不重复训练) + ExtraTrees + MLP
+    百分位平均，在可交易候选中保留集成前 50%。
+    候选<6只 / 无训练面板 / 模型全失败 / 过滤后为空 → 自动跳过或回退，绝不阻塞主流程。
+    诊断存 res.attrs["stage3"]（applied/models_used/time_s/reason/rejected）。"""
+    diag: dict = {"applied": False, "reason": ""}
+    if not ML_ENSEMBLE_ENABLED:
+        diag["reason"] = "配置关闭"
+        res.attrs["stage3"] = diag
+        return res
+    if len(res) < 6:
+        diag["reason"] = f"可交易候选仅 {len(res)} 只（<6），百分位无意义，跳过精筛"
+        res.attrs["stage3"] = diag
+        return res
+    npanel = res.attrs.get("npanel")
+    if npanel is None or len(npanel) == 0:
+        diag["reason"] = "无训练面板，跳过精筛"
+        res.attrs["stage3"] = diag
+        return res
+    try:
+        from cascade_runner import DeepRefiner, StageResult
+        # L2 已给出 LightGBM 分数则直接复用；未通过样本外 IC 时 lgb 分量弃权（空 dict），
+        # 两种情况下都不在 Stage3 重复训练 LightGBM
+        if "ML分" in res.columns and res["ML分"].notna().any():
+            lgb_scores = {str(c).zfill(6): float(s) for c, s in
+                          zip(res["代码"], res["ML分"]) if pd.notna(s)}
+        else:
+            lgb_scores = {}
+        stage2 = StageResult("Stage2-主流程", len(res), res.copy(), [], 0.0)
+        out = DeepRefiner().refine(stage2, npanel=npanel, lgb_scores=lgb_scores)
+        diag.update(out.diagnostics)
+        diag["time_s"] = round(out.stage_time_s, 1)
+        if len(out.passed) == 0:
+            diag["reason"] = "精筛过滤后为空，回退保留全部候选"
+            res.attrs["stage3"] = diag
+            return res
+        keep = out.passed
+        res = res.copy()
+        res["集成ML分"] = res["代码"].astype(str).str.zfill(6).map(
+            diag.get("code_scores") or {})
+        res["集成ML百分位"] = res["代码"].astype(str).str.zfill(6).map(
+            dict(zip(keep["代码"].astype(str).str.zfill(6), keep["ML百分位"])))
+        keep_codes = set(keep["代码"].astype(str).str.zfill(6))
+        before = len(res)
+        res = res[res["代码"].astype(str).str.zfill(6).isin(keep_codes)].copy()
+        diag["applied"] = True
+        diag["reason"] = f"{before} → {len(res)} 只"
+        diag["rejected"] = [r.detail for _, r in out.rejected]
+        res.attrs["stage3"] = diag
+        return res
+    except Exception as e:
+        diag["reason"] = f"精筛异常回退：{str(e)[:80]}"
+        res.attrs["stage3"] = diag
+        return res
+
+
 def pick_top3(res: pd.DataFrame, n: int = PICKS) -> pd.DataFrame:
     """第三步：综合打分。
     扣费收益占大头，胜率其次，趋势向上是必须条件（不满足扣大分）。
@@ -1055,6 +1114,8 @@ def pick_top3(res: pd.DataFrame, n: int = PICKS) -> pd.DataFrame:
     res = res.sort_values("总分", ascending=False)
     # 只保留扣费后还能赚钱、且近7天无利空新闻的股票
     res = res[(res["扣费总收益"] > 0) & (~res["有雷"])]
+    # Stage3 三模型集成精筛（v1.24）：在可交易集合上做最后一道 DL 筛选，保留集成前50%
+    res = ensemble_refine(res)
     return res.head(n)
 
 

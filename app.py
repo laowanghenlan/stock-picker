@@ -629,6 +629,18 @@ if run:
     if len(ranked) == 0:
         st.warning("今天没有股票通过回测+排雷验证。空仓也是一种操作，明天再来。")
         st.stop()
+    # Stage3 三模型集成精筛诊断（v1.24 接入主流程：LightGBM复用L2 + ExtraTrees + MLP）
+    _s3 = ranked.attrs.get("stage3") or {}
+    if _s3:
+        _s3_models = "、".join(_s3.get("models_used") or []) or "无可用模型"
+        if _s3.get("applied"):
+            st.caption(f"🧠 Stage3 三模型精筛（{_s3_models}）：保留 {_s3.get('reason', '')}，"
+                       f"耗时 {_s3.get('time_s', '?')}s")
+            with st.expander(f"🧠 精筛剔除明细（{len(_s3.get('rejected') or [])} 只）", expanded=False):
+                for _d in (_s3.get("rejected") or [])[:15]:
+                    st.caption(_d)
+        else:
+            st.caption(f"🧠 Stage3 集成精筛未执行：{_s3.get('reason', '')}")
     # 因子检验结果透明展示：哪些因子有效、权重多少、置信度如何，用户看得见
     _icv, _icw = res.attrs.get("ic") or {}, res.attrs.get("ic_weights") or {}
     _icir, _icn = res.attrs.get("icir") or {}, int(res.attrs.get("ic_n", 0) or 0)

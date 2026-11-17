@@ -305,7 +305,10 @@ class DeepRefiner:
     def __init__(self, ensemble: str = "avg"):
         self.ensemble = ensemble  # avg / weighted / bagging
 
-    def refine(self, stage2_result: StageResult, npanel: pd.DataFrame | None = None) -> StageResult:
+    def refine(self, stage2_result: StageResult, npanel: pd.DataFrame | None = None,
+               lgb_scores: dict[str, float] | None = None) -> StageResult:
+        """lgb_scores: 主流程复用 L2 的 LightGBM 分数时传入（避免同面板重复训练）；
+        传空 dict 表示 lgb 分量弃权（如 L2 样本外 IC 未达标）；None = 自己训练（独立运行默认）。"""
         t0 = time.time()
         candidates = stage2_result.passed.copy()
         hists = stage2_result.diagnostics.get("hists_available", {})
@@ -334,15 +337,20 @@ class DeepRefiner:
         predictions: dict[str, dict[str, float]] = {}
         model_loaded: list[str] = []
 
-        # 2a. LightGBM（已存在的 ml_model）
-        try:
-            import ml_model
-            backend = ml_model.available()
-            if backend:
-                predictions["lgb"] = self._predict_via_ml(ml_model, today_panel, candidates)
-                model_loaded.append(f"lgb({backend})")
-        except Exception as e:
-            print(f"[Cascade Stage3] lgb 跳过: {e}")
+        # 2a. LightGBM（已存在的 ml_model；主流程复用 L2 分数时跳过训练）
+        if lgb_scores is not None:
+            if lgb_scores:
+                predictions["lgb"] = lgb_scores
+                model_loaded.append("lgb(复用L2)")
+        else:
+            try:
+                import ml_model
+                backend = ml_model.available()
+                if backend:
+                    predictions["lgb"] = self._predict_via_ml(ml_model, today_panel, candidates)
+                    model_loaded.append(f"lgb({backend})")
+            except Exception as e:
+                print(f"[Cascade Stage3] lgb 跳过: {e}")
 
         # 2b. ExtraTrees（sklearn）
         try:
