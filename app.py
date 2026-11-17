@@ -643,9 +643,13 @@ if run:
     _s3 = ranked.attrs.get("stage3") or {}
     if _s3:
         _s3_models = "、".join(_s3.get("models_used") or []) or "无可用模型"
+        _s3_ic = _s3.get("model_ic") or {}
+        _s3_ic_txt = "（" + "，".join(
+            f"{k} 样本外IC={v:+.3f}" for k, v in _s3_ic.items() if v == v) + "）" \
+            if any(v == v for v in _s3_ic.values()) else ""
         if _s3.get("applied"):
             st.caption(f"🧠 Stage3 三模型精筛（{_s3_models}）：保留 {_s3.get('reason', '')}，"
-                       f"耗时 {_s3.get('time_s', '?')}s")
+                       f"耗时 {_s3.get('time_s', '?')}s {_s3_ic_txt}")
             with st.expander(f"🧠 精筛剔除明细（{len(_s3.get('rejected') or [])} 只）", expanded=False):
                 for _d in (_s3.get("rejected") or [])[:15]:
                     st.caption(_d)

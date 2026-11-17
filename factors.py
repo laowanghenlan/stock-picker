@@ -40,6 +40,8 @@ ALL_FACTOR_COLS = FACTOR_COLS + FUND_FACTORS
 IC_MIN = float(_cfg().get("因子", {}).get("IC门槛", 0.03))
 IC_AVG_N = 20        # 用最近20个交易日的截面IC均值定权（降权重抖动）
 FWD_DAYS = int(_cfg().get("因子", {}).get("FWD_DAYS", 5))   # 检验因子对未来N日收益的预测力（config可调）
+LABEL_COL = "未来5日收益"
+EXCESS_RANK_COL = "超额排名"   # 同日横截面百分位-0.5，剥离大盘beta后的相对强弱
 WARMUP = 60          # 前60根K线不参与采样（保证因子窗口完整）
 MIN_XSEC = 15        # 单个交易日截面至少15只股票才算IC
 MIN_IND = 3          # 同行业至少3只才做组内中性化，否则退回全截面
@@ -113,6 +115,25 @@ def latest_factors(h: pd.DataFrame, pe: float = None, pb: float = None,
     return {c: float(last.get(c, np.nan)) for c in ALL_FACTOR_COLS}
 
 
+def add_excess_rank(panel: pd.DataFrame, min_xsec: int = None) -> pd.DataFrame:
+    """横截面超额排名标签 = 同日"未来5日收益"的百分位 - 0.5，范围 [-0.5, 0.5)。
+
+    为什么要它：直接回归绝对收益时，标签里绝大部分是"大盘涨不涨"（beta），
+    模型学到的是择时噪声而不是选股能力——样本外IC为负就是这么来的。
+    换成同日横截面排名后，模型只学"同一天里谁比谁强"（alpha），且天然抗暴涨暴跌离群点。
+    截面不足 min_xsec 只的日期不出标签（NaN），避免小样本排名噪声。
+    注：因子IC用的是秩相关，对该变换不变，历史IC结论不受影响。"""
+    if panel is None or len(panel) == 0 or LABEL_COL not in panel.columns:
+        return panel
+    min_xsec = MIN_XSEC if min_xsec is None else min_xsec
+    out = panel.copy()
+    g = out.groupby("日期")[LABEL_COL]
+    pct = g.rank(pct=True)
+    cnt = g.transform("size")
+    out[EXCESS_RANK_COL] = (pct - 0.5).where(cnt >= min_xsec)
+    return out
+
+
 def build_panel(hists: dict, meta: dict, fundamentals: dict = None) -> pd.DataFrame:
     """把多只股票的因子序列拼成面板（长表），供逐日横截面IC计算。
     hists: {代码: 历史DataFrame}
@@ -130,7 +151,10 @@ def build_panel(hists: dict, meta: dict, fundamentals: dict = None) -> pd.DataFr
         s["代码"] = code
         s["行业"] = m.get("行业") or "未分类"
         frames.append(s)
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    if not frames:
+        return pd.DataFrame()
+    # 面板自带超额排名标签：下游模型（L2 LightGBM / Stage3 ET+MLP）优先用它，剥离大盘beta
+    return add_excess_rank(pd.concat(frames, ignore_index=True))
 
 
 def neutralize(panel: pd.DataFrame, factor_cols: list[str] | None = None) -> pd.DataFrame:

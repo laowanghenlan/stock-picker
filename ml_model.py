@@ -1,7 +1,8 @@
-"""L2 机器学习层：LightGBM（优先）/ XGBoost（备用）学习因子 → 未来5日收益的非线性关系。
+"""L2 机器学习层：LightGBM（优先）/ XGBoost（备用）学习因子 → 未来N日相对强弱的非线性关系。
 
 定位：IC 动态定权之外的"加分项"，不替代原有趋势/回测/排雷纪律。
 - 训练面板复用 factors.build_panel（已剔除每只股票最后 FWD_DAYS 根，标签不伸入预测日）
+- 标签优先用"超额排名"（同日横截面百分位，剥离大盘beta）；面板没有该列时退回原始5日收益
 - 时间顺序切分 + FWD_DAYS 天 embargo，验证段只用于报告样本外 IC
 - 样本外 IC 低于门槛（默认0.02）→ 返回结果但上层不给分，避免模型失灵时拖累选股
 - 未安装 lightgbm/xgboost 时 available() 返回 None，整个流程自动跳过（安全降级）
@@ -16,6 +17,15 @@ MIN_DATES = 40          # 最少交易日数
 EMBARGO = factors.FWD_DAYS   # 训练/验证之间留5日，防止5日收益标签跨段重叠
 OOF_IC_MIN = 0.02       # 样本外IC低于此值不给分
 LABEL_CLIP = 0.5        # 标签裁剪到±50%，避免单次暴涨暴跌主导训练
+
+
+def _label_of(npanel: pd.DataFrame) -> tuple[str, float]:
+    """选训练标签：优先横截面超额排名（剥离beta），缺失时退回原始5日收益。
+    返回 (列名, 裁剪上下限)。超额排名本身就在 ±0.5 内，裁剪不改变数值。"""
+    if factors.EXCESS_RANK_COL in npanel.columns and \
+            npanel[factors.EXCESS_RANK_COL].notna().mean() > 0.5:
+        return factors.EXCESS_RANK_COL, 0.5
+    return factors.LABEL_COL, LABEL_CLIP
 
 
 def available() -> str | None:
@@ -57,7 +67,10 @@ def fit_model(npanel: pd.DataFrame, feature_cols: list[str] | None = None) -> di
              if f in npanel.columns and npanel[f].notna().mean() > 0.3]
     if len(feats) < 3:
         return None
-    df = npanel[["日期", "代码", "未来5日收益"] + feats].dropna(subset=["未来5日收益"]).copy()
+    label_col, clip = _label_of(npanel)
+    if label_col not in npanel.columns:
+        return None
+    df = npanel[["日期", "代码", label_col] + feats].dropna(subset=[label_col]).copy()
     df["日期"] = pd.to_datetime(df["日期"])
     df = df.sort_values("日期")
     dates = np.array(sorted(df["日期"].unique()))
@@ -66,7 +79,7 @@ def fit_model(npanel: pd.DataFrame, feature_cols: list[str] | None = None) -> di
 
     # 保留因子列名，训练与预测使用同一特征顺序，也避免 sklearn 特征名警告
     X = df[feats].astype(float).fillna(0.0)
-    y = df["未来5日收益"].astype(float).clip(-LABEL_CLIP, LABEL_CLIP)
+    y = df[label_col].astype(float).clip(-clip, clip)
 
     # 样本外验证：最后20%的交易日，训练/验证之间留 embargo
     split = int(len(dates) * 0.8)
@@ -90,7 +103,7 @@ def fit_model(npanel: pd.DataFrame, feature_cols: list[str] | None = None) -> di
     model.fit(X, y)
     imp = sorted(zip(feats, np.asarray(model.feature_importances_, dtype=float)),
                  key=lambda x: -x[1])[:5]
-    return {"backend": backend, "_model": model,
+    return {"backend": backend, "_model": model, "label": label_col,
             "oof_ic": oof_ic, "oof_pass": bool(oof_ic == oof_ic and oof_ic >= OOF_IC_MIN),
             "n_rows": int(len(df)), "n_dates": int(len(dates)),
             "features": feats, "importance": imp}

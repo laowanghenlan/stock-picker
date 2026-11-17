@@ -338,6 +338,7 @@ class DeepRefiner:
         model_loaded: list[str] = []
 
         # 2a. LightGBM（已存在的 ml_model；主流程复用 L2 分数时跳过训练）
+        model_ic: dict[str, float] = {}
         if lgb_scores is not None:
             if lgb_scores:
                 predictions["lgb"] = lgb_scores
@@ -347,24 +348,31 @@ class DeepRefiner:
                 import ml_model
                 backend = ml_model.available()
                 if backend:
-                    predictions["lgb"] = self._predict_via_ml(ml_model, today_panel, candidates)
-                    model_loaded.append(f"lgb({backend})")
+                    sc, ic = self._predict_via_ml(ml_model, today_panel, candidates)
+                    model_ic["lgb"] = ic
+                    if sc:
+                        predictions["lgb"] = sc
+                        model_loaded.append(f"lgb({backend})")
             except Exception as e:
                 print(f"[Cascade Stage3] lgb 跳过: {e}")
 
-        # 2b. ExtraTrees（sklearn）
+        # 2b. ExtraTrees（sklearn）— 样本外IC达标才参与
         try:
-            predictions["et"] = self._predict_via_sklearn(
-                "et", today_panel, candidates, _factors)
-            model_loaded.append("et")
+            sc, ic = self._predict_via_sklearn("et", today_panel, candidates, _factors)
+            model_ic["et"] = ic
+            if sc:
+                predictions["et"] = sc
+                model_loaded.append("et")
         except Exception as e:
             print(f"[Cascade Stage3] et 跳过: {e}")
 
-        # 2c. MLP（sklearn.neural_network，真正的神经网络精筛）
+        # 2c. MLP（sklearn.neural_network）— 样本外IC达标才参与
         try:
-            predictions["mlp"] = self._predict_via_sklearn(
-                "mlp", today_panel, candidates, _factors)
-            model_loaded.append("mlp")
+            sc, ic = self._predict_via_sklearn("mlp", today_panel, candidates, _factors)
+            model_ic["mlp"] = ic
+            if sc:
+                predictions["mlp"] = sc
+                model_loaded.append("mlp")
         except Exception as e:
             print(f"[Cascade Stage3] mlp 跳过: {e}")
 
@@ -415,69 +423,117 @@ class DeepRefiner:
             diagnostics={
                 "models_used": model_loaded,
                 "n_models": len(model_loaded),
+                "model_ic": model_ic,
                 "code_scores": code_scores,
                 "code_ensemble_detail": code_ensemble,
                 "ensemble_threshold": threshold,
             },
         )
 
-    def _predict_via_ml(self, ml_mod, panel: pd.DataFrame, candidates: pd.DataFrame) -> dict[str, float]:
-        """用现有 ml_model 预测。"""
+    def _predict_via_ml(self, ml_mod, panel: pd.DataFrame,
+                        candidates: pd.DataFrame) -> tuple[dict[str, float], float]:
+        """用现有 ml_model 预测。返回 (分数, 样本外IC)；IC 未达标时分数为空（模型弃权）。"""
         if panel is None or len(panel) == 0:
-            return {}
+            return {}, float("nan")
         feats = [f + "_n" for f in __import__("factors").ALL_FACTOR_COLS
                  if f + "_n" in panel.columns]
         today = panel[panel["代码"].isin(candidates["代码"].astype(str).str.zfill(6))].copy()
         if len(today) < 3:
-            return {}
+            return {}, float("nan")
         fitted = ml_mod.fit_model(panel, feats)
         if fitted is None:
-            return {}
+            return {}, float("nan")
+        oof_ic = float(fitted.get("oof_ic", float("nan")))
+        if not fitted.get("oof_pass"):
+            return {}, oof_ic
         scores = ml_mod.predict_scores(fitted, today).rank(pct=True)
-        return dict(zip(today["代码"].astype(str).str.zfill(6), scores.round(4)))
+        return dict(zip(today["代码"].astype(str).str.zfill(6), scores.round(4))), oof_ic
+
+    @staticmethod
+    def _new_sklearn_model(model_type: str, et_cls, mlp_cls):
+        if model_type == "et":
+            return et_cls(n_estimators=200, max_depth=6, min_samples_leaf=20,
+                          random_state=42, n_jobs=2)
+        if model_type == "mlp":
+            return mlp_cls(hidden_layer_sizes=(64, 32), max_iter=500,
+                           early_stopping=True, random_state=42)
+        raise ValueError(f"未知模型类型: {model_type}")
+
+    @staticmethod
+    def _cross_sectional_ic(dates: np.ndarray, pred: np.ndarray, y: np.ndarray,
+                            min_xsec: int = 15) -> float:
+        """逐日横截面秩相关均值（Spearman IC）。"""
+        chk = pd.DataFrame({"日期": dates, "p": pred, "y": y})
+        ics = []
+        for _, g in chk.groupby("日期"):
+            if len(g) >= min_xsec:
+                ics.append(g["p"].rank().corr(g["y"].rank()))
+        return float(np.nanmean(ics)) if ics else float("nan")
 
     def _predict_via_sklearn(self, model_type: str, panel: pd.DataFrame,
-                             candidates: pd.DataFrame, factors_mod) -> dict[str, float]:
-        """sklearn 的 ExtraTrees / MLP 模型。"""
+                             candidates: pd.DataFrame, factors_mod,
+                             min_ic: float = 0.02) -> tuple[dict[str, float], float]:
+        """sklearn 的 ExtraTrees / MLP 模型。
+
+        与 LightGBM 同一套准入纪律（v1.25）：
+        - 标签优先用横截面超额排名（剥离大盘beta），缺失时退回原始5日收益
+        - 按日期切分最后20%做样本外验证，训练/验证之间留 FWD_DAYS 天 embargo
+        - 样本外横截面秩相关 IC < min_ic → 返回空预测，该模型不参与精筛（绝不拿噪声砍股票）
+        """
         from sklearn.ensemble import ExtraTreesRegressor
         from sklearn.neural_network import MLPRegressor
-        from sklearn.model_selection import train_test_split
 
-        if panel is None or len(panel) < 60:
-            return {}
+        if panel is None or len(panel) < 100:
+            return {}, float("nan")
         feats = [f + "_n" for f in factors_mod.ALL_FACTOR_COLS
                  if f + "_n" in panel.columns]
         feats = [f for f in feats if panel[f].notna().mean() > 0.3]
         if len(feats) < 3:
-            return {}
-        label_col = "未来5日收益"
+            return {}, float("nan")
+
+        label_col = getattr(factors_mod, "EXCESS_RANK_COL", None)
+        if label_col is None or label_col not in panel.columns \
+                or panel[label_col].notna().mean() < 0.5:
+            label_col = getattr(factors_mod, "LABEL_COL", "未来5日收益")
         if label_col not in panel.columns:
-            return {}
+            return {}, float("nan")
+
         df = panel[feats + [label_col, "日期", "代码"]].dropna(subset=[label_col]).copy()
         if len(df) < 100:
-            return {}
+            return {}, float("nan")
+        df["日期"] = pd.to_datetime(df["日期"])
+        df = df.sort_values("日期")
         X = df[feats].astype(float).fillna(0.0).values
         y = df[label_col].astype(float).clip(-0.5, 0.5).values
 
-        if model_type == "et":
-            model = ExtraTreesRegressor(n_estimators=200, max_depth=6,
-                                        min_samples_leaf=20, random_state=42, n_jobs=2)
-        elif model_type == "mlp":
-            model = MLPRegressor(hidden_layer_sizes=(64, 32), max_iter=500,
-                                 early_stopping=True, random_state=42)
-        else:
-            return {}
+        # 样本外验证（按日期切分 + embargo，避免 5 日标签跨段重叠）
+        dates = np.array(sorted(df["日期"].unique()))
+        if len(dates) < 30:
+            return {}, float("nan")
+        split = int(len(dates) * 0.8)
+        embargo = int(getattr(factors_mod, "FWD_DAYS", 5))
+        tr_mask = df["日期"].isin(dates[:max(1, split - embargo)]).values
+        va_mask = df["日期"].isin(dates[split:]).values
+        if va_mask.sum() < 50:
+            return {}, float("nan")
+        probe = self._new_sklearn_model(model_type, ExtraTreesRegressor, MLPRegressor)
+        probe.fit(X[tr_mask], y[tr_mask])
+        oof_ic = self._cross_sectional_ic(
+            df["日期"].values[va_mask], probe.predict(X[va_mask]), y[va_mask],
+            min_xsec=int(getattr(factors_mod, "MIN_XSEC", 15)))
+        if not (oof_ic == oof_ic) or oof_ic < min_ic:
+            print(f"[Cascade Stage3] {model_type} 样本外IC={oof_ic:.3f} < {min_ic}，弃权")
+            return {}, oof_ic
 
+        # 通过门禁后，用全部历史重训再预测当日候选
+        model = self._new_sklearn_model(model_type, ExtraTreesRegressor, MLPRegressor)
         model.fit(X, y)
-
-        # 预测当日候选
         today = df.groupby("代码").tail(1).copy()
         if len(today) == 0:
-            return {}
+            return {}, oof_ic
         Xt = today[feats].astype(float).fillna(0.0).values
-        preds = model.predict(Xt)
-        scores = pd.Series(preds, index=today.index).rank(pct=True)
-        return dict(zip(today["代码"].astype(str).str.zfill(6), scores.round(4)))
+        scores = pd.Series(model.predict(Xt), index=today.index).rank(pct=True)
+        return dict(zip(today["代码"].astype(str).str.zfill(6), scores.round(4))), oof_ic
 
 
 # =============================================================
