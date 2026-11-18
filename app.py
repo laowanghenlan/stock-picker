@@ -343,7 +343,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.24"     # v1.24 多源数据管道重构 + DuckDB 数仓 + 专业统计门禁（胜率显著性/IC稳定性/VaR/分布）
+APP_VERSION = "v1.25"     # v1.25 因子研究增强：IC窗口20→60降噪 + 市值中性化/单调性检验/候选因子(配置可开启)
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
