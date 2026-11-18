@@ -374,7 +374,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.47"     # v1.47 邮件历史表现也显示盈利概率:复盘明细/上一次推送卡片的文本版+HTML版四段渲染都补上「当时概率」列(v1.46只加了数据字段没接渲染层,邮件看不到);沿用 v1.46 历史复盘加「当时盈利概率」列:推送留档存下当时的校准盈利概率(web端app.py+邮件端daily_push.py两条路径)+复盘表与盈亏%并排对照,旧批次无留档显示—不编造;沿用 v1.45 价格带严格生效:去掉CSI成分股价格上限豁免(旧逻辑让100~500元高价股也进池)+下限5→8元+页面显示完整区间8~50;沿用 v1.44 改名老王每日选股+v1.43 P0修复(漏import numpy致选股恒空)+v1.42 提速四项+v1.41 舆情直连降级放行+v1.40 去持仓体检+v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
+APP_VERSION = "v1.48"     # v1.48 P0修复线上KeyError:REVIEW_CACHE_KEY v1.22→v1.48强制st.cache_data旧复盘缓存失效(旧缓存无「当时盈利概率」列,g[_cols]报错整页白屏)+app展示前兜底缺列补—;沿用 v1.47 邮件历史表现也显示盈利概率:复盘明细/上一次推送卡片的文本版+HTML版四段渲染都补上「当时概率」列(v1.46只加了数据字段没接渲染层,邮件看不到);沿用 v1.46 历史复盘加「当时盈利概率」列:推送留档存下当时的校准盈利概率(web端app.py+邮件端daily_push.py两条路径)+复盘表与盈亏%并排对照,旧批次无留档显示—不编造;沿用 v1.45 价格带严格生效:去掉CSI成分股价格上限豁免(旧逻辑让100~500元高价股也进池)+下限5→8元+页面显示完整区间8~50;沿用 v1.44 改名老王每日选股+v1.43 P0修复(漏import numpy致选股恒空)+v1.42 提速四项+v1.41 舆情直连降级放行+v1.40 去持仓体检+v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
 
 st.set_page_config(page_title="老王每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
@@ -477,6 +477,8 @@ with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}批）", expanded=F
                    "云端启动时不自动执行，避免数据源 hang 住拖垮整个页面。")
     else:
         rv = review_performance(REVIEW_CACHE_KEY)
+        if len(rv) > 0 and "当时盈利概率" not in rv.columns:
+            rv["当时盈利概率"] = "—"   # 兜底：旧缓存缺列也不崩（正常靠 REVIEW_CACHE_KEY 失效解决）
         if len(rv) == 0:
             st.caption("暂无历史推荐，有推荐后会自动复盘。")
         else:

@@ -360,7 +360,7 @@ def _confidence(n_done: int, threshold: int) -> float:
 REVIEW_FILE = Path(__file__).parent / "推送记录.csv"   # GitHub Actions 每日推送留档
 REVIEW_N = 10            # 默认复盘最近10个推送批次（按日期+推送时间整批保留，不切断批次）
 REVIEW_DAYS = 20         # 推荐后最长跟踪20个交易日（与策略持有期一致），触发止盈/止损即出结果
-REVIEW_CACHE_KEY = "v1.22"   # 版本升级强制刷新，避免旧缓存缺少股数/盈亏额等新字段
+REVIEW_CACHE_KEY = "v1.48"   # 版本升级强制刷新，避免旧缓存缺少股数/盈亏额/当时盈利概率等新字段（xx=v1.47加当时盈利概率列后必须失效旧缓存，否则 g[_cols] KeyError）
 
 
 def _run_with_timeout(fn, *args, timeout=8, **kwargs):
