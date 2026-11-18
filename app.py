@@ -406,7 +406,7 @@ def _dzh_fundflow_contrast(codes, key):
         return None, f"{type(e).__name__}: {str(e)[:120]}"
 
 
-APP_VERSION = "v1.36"     # v1.36 清除页面上三处硬编码"v1.24"误导标签(三级漏斗/专业统计诊断/因子稳定性),顶部版本改醒目横幅,消除"web还是1.24"的误判;沿用 v1.35 云端KEY隐患修复+v1.34 资金流对照内嵌+v1.33 KEY直连实测+v1.32 T+1精筛内嵌+v1.31 KEY客户端+v1.30 标注层+v1.29 粗筛→精筛+v1.28 全因子+v1.27 台账+v1.26 复盘净额
+APP_VERSION = "v1.37"     # v1.37 按用户要求从页面隐藏"实盘OOS台账·真实IC"展示区(数据照常后台记录/回填不删);沿用 v1.36 清除v1.24误导标签+顶部醒目版本横幅+v1.35 云端KEY修复+v1.34 资金流对照+v1.33 KEY直连+v1.32 T+1精筛+v1.31 KEY客户端+v1.30 标注层+v1.29 粗筛→精筛+v1.28 全因子+v1.27 台账+v1.26 复盘净额
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
@@ -568,40 +568,9 @@ with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}批）", expanded=F
                        "（每笔约10元固定成本）；费用列可核对。涨跌%是纯价格涨跌，盈亏%是扣费后的净收益率，"
                        "胜率按盈亏额正负统计——小额盈利扣费后转亏的，不计为胜。")
 
-# ---------------- 实盘 OOS 台账（预测口径：事后按5/10日收益算真实IC，验证回测优势还剩多少） ----------------
-with st.expander("🧪 实盘 OOS 台账 · 真实IC（自动回填，累计中）", expanded=False):
-    _oos_btn = st.button("🔄 刷新台账 / 立即回填", key="refresh_oos")
-    if _oos_btn:
-        try:
-            import oos_ledger
-            _n = oos_ledger.update_due(force=True)
-            st.caption(f"本次新回填 {_n} 个字段")
-        except Exception as _e:
-            st.caption(f"回填失败：{_e}")
-    try:
-        import oos_ledger
-        _oos_df = oos_ledger._read()
-        _det, _txt = oos_ledger.ic_stats()
-        st.caption(_txt)
-        if len(_oos_df):
-            _filled5 = int(_oos_df["实际5日收益%"].notna().sum())
-            _filled10 = int(_oos_df["实际10日收益%"].notna().sum())
-            p1, p2, p3 = st.columns(3)
-            p1.metric("预测总数", f"{len(_oos_df)} 条")
-            p2.metric("已回填5日", f"{_filled5} 条")
-            p3.metric("已回填10日", f"{_filled10} 条")
-            st.caption("台账只记当时评分与推荐价，满5/10个交易日自动拉收盘价回填；"
-                       "同一批次≥5只才算一次横截面IC。样本攒够30+批次后，真实IC才有统计意义——"
-                       "这是唯一能验证\"回测优势在实盘还剩多少\"的硬数据。")
-            if len(_det):
-                st.dataframe(_det, width="stretch", hide_index=True)
-                st.caption(f"真实IC均值 {_det['IC'].mean():+.4f}，为正 {(_det['IC'] > 0).sum()}/{len(_det)} 批。"
-                           "对比网页上方样本外IC：差距越大，说明回测里的优势越多来自历史拟合。")
-            else:
-                st.info("还没到能算IC的批次（需同批≥5只且满5个交易日）。最早一批 11-12 推送，"
-                        "满5个交易日后自动回填，届时这里会出现真实IC。")
-    except Exception as _e:
-        st.caption(f"台账读取失败：{_e}")
+# ---------------- 实盘 OOS 台账：后台照常记录与自动回填（v1.37 按用户要求从页面隐藏，数据不删） ----------------
+# 记录/回填逻辑在上方 _handle_scheduled_action 与页面初始化处（oos_ledger.record/update_due），
+# 不再在界面展示台账区。数据仍写入 实盘台账.csv，需要时本地查看即可。
 
 # ---------------- 页面：一个按钮 + 一张结果表 ----------------
 st.caption(f"本金 {capital:.0f} 元 · 只数由本金+预期收益自动优化 · 股价上限 {MAX_PRICE:.1f} 元 · "
