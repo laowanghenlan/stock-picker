@@ -30,7 +30,7 @@ from data import (get_history, get_history_impl, get_spot,
 from strategy import (at_limit_down, at_limit_up, backtest, calibrate_win_rate,
                       generate_signals)
 
-import factors  # L1 多因子层：动量/波动率/换手/估值 + 行业中性 + 20日IC均值配权
+import factors  # L1 多因子层：动量/波动率/换手/估值 + 行业中性 + 可配置窗口IC均值配权(默认60日)
 # 选股引擎统一放在 screen_service（纯 Python，无 Streamlit 依赖）；
 # 这里显式导入，保证 app.xxx 在测试/脚本里沿用原名字
 from screen_service import (CANDIDATES, CANDIDATES_PUSH, HISTORY_DAYS, IC_GATE, MAX_PRICE, MIN_PRICE, ML_WEIGHT,

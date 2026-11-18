@@ -369,16 +369,76 @@ def rolling_ic(forward_returns: pd.DataFrame | pd.Series,
                factors: pd.DataFrame,
                window: int = 1,
                method: str = "spearman") -> pd.DataFrame:
-    """滚动因子 IC 面板。factors 是股票 × 因子的 DataFrame（每行一个交易日）。
-    返回 IC 时间序列（每一行 = 一个交易日，每一列 = 一个因子）。
-    用这个就能喂给 factor_stability() 逐个诊断因子稳定性。"""
-    # forward_returns: 股票 x 日期 的 DataFrame，或一个 Series
-    # factors: 日期 x 因子 x 股票 ... 这里假设是 日期 x 因子 的横截面
-    # 简化：factors 是一个 dict，key=日期，value=DataFrame(股票 x 因子)
-    # 或者直接把 forward_returns 设为"未来 5 日收益"，和 factor 的日期对齐
-    from scipy.stats import spearmanr  # 可选，自己写 Spearman 也行
-    # 这里留一个简化实现，详细版在 factors.py
-    return None
+    """滚动因子 IC 面板（v1.25 补全空壳，纯 numpy/pandas 不依赖 scipy）。
+
+    factors: 长表面板，需含"日期""代码"及若干因子列；
+    forward_returns: 与 factors 等长、同索引的"未来N日收益"Series（或列名字符串）。
+    返回 IC 时间序列（index=日期，columns=因子），可喂给 factor_stability() 逐个诊断。
+    """
+    if factors is None or len(factors) == 0:
+        return pd.DataFrame()
+    df = factors.copy()
+    if isinstance(forward_returns, str):
+        label = forward_returns
+    elif isinstance(forward_returns, pd.Series):
+        label = "_fwd"
+        df[label] = forward_returns.reindex(df.index).values
+    else:
+        return pd.DataFrame()
+    if "日期" not in df.columns or label not in df.columns:
+        return pd.DataFrame()
+    fcols = [c for c in df.columns if c not in ("日期", "代码", label)]
+    rows = {}
+    for d, g in df.groupby("日期"):
+        if len(g) < 8:
+            continue
+        row = {}
+        for f in fcols:
+            d2 = g[[f, label]].dropna()
+            if len(d2) < 8:
+                continue
+            row[f] = d2[f].rank().corr(d2[label].rank())
+        if row:
+            rows[d] = row
+    return pd.DataFrame(rows).T.sort_index() if rows else pd.DataFrame()
+
+
+def monotonicity_test(panel: pd.DataFrame, factor: str,
+                      label_col: str = "未来5日收益", n_groups: int = 5) -> dict:
+    """P0-③ 分层单调性检验：把因子按截面分 n_groups 组，看各组未来收益是否单调。
+
+    IC 只衡量秩相关，可能把"IC偶然为正但分组收益不单调"的伪因子放进来。
+    学术标准要求有效因子必须分层单调。本函数给出：
+      - group_means: 各组平均前瞻收益（从低因子组到高因子组）
+      - spearman: 组号 vs 组收益的秩相关（|值|越接近1越单调）
+      - monotonic: 是否严格单调（全升或全降）
+      - spread: 最高组 - 最低组收益差（多空收益，需为正才有多头意义或反向可做）
+    """
+    empty = {"factor": factor, "group_means": [], "spearman": 0.0,
+             "monotonic": False, "spread": 0.0, "n": 0, "warning": "样本不足"}
+    if panel is None or factor not in panel.columns or label_col not in panel.columns:
+        return empty
+    d = panel[[factor, label_col]].dropna()
+    if len(d) < n_groups * 20:
+        return empty
+    try:
+        # 先在每个交易日内把因子转百分位，再跨日 pooling，避免不同日因子量纲混在一起
+        pct = d.groupby(level=0)[factor].rank(pct=True) if isinstance(d.index, pd.MultiIndex) \
+            else d[factor].rank(pct=True)
+        d = d.assign(_pct=pct)
+        d["grp"] = pd.qcut(d["_pct"], n_groups, labels=False, duplicates="drop")
+        means = d.groupby("grp")[label_col].mean()
+        vals = np.asarray(means.values, dtype=float)
+        grp_idx = np.arange(len(vals))
+        rho = float(pd.Series(grp_idx).corr(pd.Series(vals), method="spearman")) if len(vals) >= 2 else 0.0
+        mono = bool(np.all(np.diff(vals) >= 0) or np.all(np.diff(vals) <= 0))
+        return {"factor": factor,
+                "group_means": [round(float(x), 4) for x in vals],
+                "spearman": round(rho, 3), "monotonic": mono,
+                "spread": round(float(vals[-1] - vals[0]), 4), "n": int(len(d)),
+                "warning": None}
+    except Exception as e:
+        return {**empty, "warning": str(e)[:80]}
 
 
 # =============================================================

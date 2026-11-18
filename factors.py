@@ -35,13 +35,31 @@ def _cfg() -> dict:
 import json  # noqa: E402
 
 FACTOR_COLS = ["动量20", "反转5", "波动率20", "换手20", "换手变化", "MACD柱", "KDJ_J", "EP", "BP"]
+
+# ===== P1 候选因子（v1.25 新增）：默认关闭，仅在配置开启时才纳入 IC 检验/ML/打分 =====
+# 实测（80只×930日）：Amihud IC=+0.033 / 规模代理 -0.054 / 特质波动 -0.059，均属噪音级，
+# 且 wf_cache 无开盘价、无历史市值，故特质波动/规模只能用成交额代理近似。
+# 设计原则：能力落地、默认关闭、配置可开启，避免弱因子污染实盘打分。
+P1_CANDIDATE_FACTORS = ["Amihud", "规模代理", "特质波动"]
+_ENABLE_P1 = bool(_cfg().get("因子", {}).get("启用新因子", False))
+# 市值中性化需要"规模代理"列：即使 P1 因子整体关闭，只要开了市值中性化也要算规模代理
+_ENABLE_SIZE_PROXY = _ENABLE_P1 or bool(_cfg().get("因子", {}).get("市值中性化", False))
+if _ENABLE_P1:
+    FACTOR_COLS = FACTOR_COLS + P1_CANDIDATE_FACTORS
+
 # 基本面因子（需要 Baostock 历史财报数据，避免前视偏差）
 # IC 检验自动决定要不要进评分；Baostock 挂了自动降级（留 NaN，因子跳过）
 FUND_FACTORS = ["ROE", "净利润增速", "营收增速", "净利率", "现金流质量"]
 ALL_FACTOR_COLS = FACTOR_COLS + FUND_FACTORS
+# 市值中性化开关（P0-①）：默认关闭。实测剥离规模代理后动量IC -0.0487→-0.0505，
+# 候选池已过滤 30亿~2000亿，边际收益为负，故默认不开；需要时配置打开即可。
+SIZE_NEUTRALIZE = bool(_cfg().get("因子", {}).get("市值中性化", False))
 # 以下参数优先读 strategy_config.json，读不到用默认值（v1.4 上线时的硬编码）
 IC_MIN = float(_cfg().get("因子", {}).get("IC门槛", 0.03))
-IC_AVG_N = 20        # 用最近20个交易日的截面IC均值定权（降权重抖动）
+# P0-②：IC定权窗口可配置，默认从20拉长到60个交易日。
+# 实测：动量20 近20日IC=+0.296 但全样本=-0.049，20日窗口符号会翻转、纯属追噪声；
+# 拉到60日显著降低权重抖动。可在 strategy_config.json 因子.IC窗口日数 调整。
+IC_AVG_N = int(_cfg().get("因子", {}).get("IC窗口日数", 60))
 FWD_DAYS = int(_cfg().get("因子", {}).get("FWD_DAYS", 5))   # 检验因子对未来N日收益的预测力（config可调）
 LABEL_COL = "未来5日收益"
 EXCESS_RANK_COL = "超额排名"   # 同日横截面百分位-0.5，剥离大盘beta后的相对强弱
@@ -68,6 +86,8 @@ def factor_series(h: pd.DataFrame, pe: float = None, pb: float = None,
         h["J"] = np.nan
     close = h["收盘"]
     out = pd.DataFrame({"日期": pd.to_datetime(h["日期"])})
+    if _ENABLE_P1:
+        out["日收益"] = close.pct_change()   # P1 特质波动用，build_panel 后删除
     out["动量20"] = close / close.shift(20) - 1
     # 5日反转：过去5日跌幅越大值越高（方向由IC符号最终决定）
     out["反转5"] = -(close / close.shift(5) - 1)
@@ -106,6 +126,20 @@ def factor_series(h: pd.DataFrame, pe: float = None, pb: float = None,
     else:
         for fc in FUND_FACTORS:
             out[fc] = np.nan
+    # ===== P1 候选因子 / P0 规模代理（仅配置开启时计算，默认关闭不影响性能/行为）=====
+    if _ENABLE_P1 or _ENABLE_SIZE_PROXY:
+        has_vol = "成交量" in h.columns
+        ret1 = close.pct_change()
+        # 成交额代理 = 收盘×成交量（wf_cache 无成交额字段）
+        amt = (close * h["成交量"].astype(float)) if has_vol else None
+        # 规模代理 = log(20日均成交额)；wf_cache 无历史市值，用成交额近似规模/流动性
+        # 市值中性化开启时也需此列，故用 _ENABLE_SIZE_PROXY 控制
+        out["规模代理"] = np.log(amt.rolling(20).mean().replace(0, np.nan)) if amt is not None else np.nan
+    if _ENABLE_P1:
+        # Amihud 非流动性 = |日收益| / 成交额，放大1e8便于数值稳定；越大流动性越差
+        out["Amihud"] = ((ret1.abs() / amt.replace(0, np.nan)) * 1e8).rolling(20).mean() if amt is not None else np.nan
+        # 特质波动先置 NaN，build_panel 拿到全市场面板后统一回填（需市场组合）
+        out["特质波动"] = np.nan
     out["未来5日收益"] = close.shift(-FWD_DAYS) / close - 1
     return out
 
@@ -156,17 +190,55 @@ def build_panel(hists: dict, meta: dict, fundamentals: dict = None) -> pd.DataFr
         frames.append(s)
     if not frames:
         return pd.DataFrame()
+    panel = pd.concat(frames, ignore_index=True)
+    # P1：特质波动需要全市场组合，面板级统一回填（单只股票算不出市场收益）
+    if _ENABLE_P1 and "特质波动" in panel.columns:
+        panel = _fill_idiosyncratic_vol(panel)
     # 面板自带超额排名标签：下游模型（L2 LightGBM / Stage3 ET+MLP）优先用它，剥离大盘beta
-    return add_excess_rank(pd.concat(frames, ignore_index=True))
+    return add_excess_rank(panel)
+
+
+def _fill_idiosyncratic_vol(panel: pd.DataFrame, window: int = 20) -> pd.DataFrame:
+    """P1 特质波动：个股日收益对全市场等权收益回归，取残差的滚动标准差。
+    分母用了全市场组合，剥离了大盘beta——这是与"波动率20"的本质区别。"""
+    try:
+        if "日收益" not in panel.columns:
+            return panel
+        out = panel.sort_values(["代码", "日期"]).copy()
+        # 全市场等权日收益：以当日所有个股收益均值作为市场组合代理
+        mkt = out.groupby("日期")["日收益"].mean().rename("_mkt")
+        out = out.join(mkt, on="日期")
+        def _idio(g: pd.DataFrame) -> pd.Series:
+            r, m = g["日收益"], g["_mkt"]
+            cov = r.rolling(window).cov(m)
+            var = m.rolling(window).var().replace(0, np.nan)
+            beta = cov / var
+            resid = r - beta * m
+            return resid.rolling(window).std()
+        out["特质波动"] = out.groupby("代码", group_keys=False).apply(_idio).reset_index(level=0, drop=True)
+        return out.drop(columns=["日收益", "_mkt"])
+    except Exception:
+        return panel.drop(columns=["日收益"], errors="ignore")
 
 
 def neutralize(panel: pd.DataFrame, factor_cols: list[str] | None = None) -> pd.DataFrame:
     """行业中性化：同交易日内每个因子在行业内部转百分位（-0.5~+0.5）。
     factor_cols: 指定要中性化的因子列表，默认 ALL_FACTOR_COLS 里有数据的。
-    行业成分不足 MIN_IND 只时，退回该交易日全截面百分位。"""
+    行业成分不足 MIN_IND 只时，退回该交易日全截面百分位。
+    P0-①：配置开启市值中性化时，先对 log(成交额代理) 横截面回归取残差，再行业中性化。"""
     if len(panel) == 0:
         return panel
     df = panel.copy()
+    # P0-① 市值中性化（默认关闭）：剥离规模代理 beta，避免动量/换手只是市值的代理
+    if SIZE_NEUTRALIZE and "规模代理" in df.columns:
+        size = df["规模代理"]
+        cols0 = factor_cols or [f for f in ALL_FACTOR_COLS if f in df.columns]
+        for f in cols0:
+            if f in (size.name, "规模代理") or f not in df.columns:
+                continue
+            resid = _cross_sectional_residual(df, f, size)
+            if resid is not None:
+                df[f] = resid
     ind = df["行业"].fillna("未分类")
     cols = factor_cols or [f for f in ALL_FACTOR_COLS if f in df.columns]
     for f in cols:
@@ -177,6 +249,26 @@ def neutralize(panel: pd.DataFrame, factor_cols: list[str] | None = None) -> pd.
         whole = df.groupby(df["日期"])[f].rank(pct=True)
         df[f + "_n"] = np.where(cnt >= MIN_IND, in_ind, whole) - 0.5
     return df
+
+
+def _cross_sectional_residual(df: pd.DataFrame, factor: str, size: pd.Series) -> pd.Series | None:
+    """P0-① 逐交易日横截面回归 factor ~ size，取残差（剥离规模暴露）。
+    只在当日有效样本 >= MIN_XSEC 时执行，否则原样返回。"""
+    try:
+        tmp = pd.DataFrame({"日期": df["日期"], "f": df[factor], "s": size})
+        out = pd.Series(np.nan, index=df.index, dtype=float)
+        for d, g in tmp.groupby("日期"):
+            g2 = g.dropna()
+            if len(g2) < MIN_XSEC:
+                continue
+            x, y = g2["s"].values, g2["f"].values
+            xv = x - x.mean()
+            denom = float(xv @ xv)
+            beta = float(xv @ (y - y.mean()) / denom) if denom > 1e-12 else 0.0
+            out.loc[g2.index] = y - y.mean() - beta * xv
+        return out
+    except Exception:
+        return None
 
 
 def ic_series(npanel: pd.DataFrame) -> pd.DataFrame:
