@@ -62,7 +62,7 @@ IC_GATE = app.IC_GATE                                 # 训练期组合IC低于�
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.53"   # 与 app.py 同步（v1.53 邮件也显示减持:build_plan_items批量查近90天减持+文本/HTML两版渲染🔴新减持,失败降级—）
+APP_VERSION = "v1.54"   # 与 app.py 同步（v1.54 实盘台账改股票×交易日口径、新增T+1隔夜收益；邮件发信行为不变。前版v1.53 邮件也显示减持:build_plan_items批量查近90天减持+文本/HTML两版渲染🔴新减持,失败降级—）
 
 
 FONT = "-apple-system,'PingFang SC','Microsoft YaHei',Arial,sans-serif"
