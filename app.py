@@ -406,13 +406,13 @@ def _dzh_fundflow_contrast(codes, key):
         return None, f"{type(e).__name__}: {str(e)[:120]}"
 
 
-APP_VERSION = "v1.35"     # v1.35 修云端KEY隐患(空输入自动回退Secrets,不覆盖云端KEY)+加"已检测到云端KEY"可见状态(显示尾号供核对);沿用 v1.34 资金流对照内嵌今日选股+v1.33 KEY直连实测+v1.32 T+1精筛内嵌+v1.31 KEY客户端+v1.30 标注层+v1.29 粗筛→精筛+v1.28 全因子+v1.27 台账+v1.26 复盘净额
+APP_VERSION = "v1.36"     # v1.36 清除页面上三处硬编码"v1.24"误导标签(三级漏斗/专业统计诊断/因子稳定性),顶部版本改醒目横幅,消除"web还是1.24"的误判;沿用 v1.35 云端KEY隐患修复+v1.34 资金流对照内嵌+v1.33 KEY直连实测+v1.32 T+1精筛内嵌+v1.31 KEY客户端+v1.30 标注层+v1.29 粗筛→精筛+v1.28 全因子+v1.27 台账+v1.26 复盘净额
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
     st.stop()
 st.title("📈 每日选股")
-st.caption(APP_VERSION)
+st.markdown(f"**当前版本：{APP_VERSION}**")
 
 # ---------------- 大盘温度横幅（低温期提示空仓） ----------------
 _idx_result = _run_with_timeout(market_temperature, timeout=20)
@@ -714,8 +714,8 @@ if run:
         st.caption("这是风控开关：信号弱到噪声级时硬推票，期望收益不如空仓。")
         st.stop()
 
-    # ===== 三级漏斗视图（v1.24 新增：粗筛→验证→DL精筛 的可解释性）=====
-    with st.expander("🔻 三级漏斗可视化（v1.24）", expanded=False):
+    # ===== 三级漏斗视图（粗筛→验证→DL精筛 的可解释性）=====
+    with st.expander("🔻 三级漏斗可视化", expanded=False):
         try:
             from cascade_runner import CascadeRunner, CoarseScreener
             # Stage1: 复用已缓存的快照做粗筛（绝不在这里发起新的联网拉取）
@@ -865,8 +865,8 @@ if run:
     elif cb_level >= 1:
         st.warning("🟡 已触发降半仓！建议实际买入金额为页面显示的一半。")
 
-    # ===== 专业统计诊断（v1.24 新增：胜率显著性 / IC稳定性 / VaR / 分布） =====
-    with st.expander("📐 专业统计诊断（v1.24）", expanded=False):
+    # ===== 专业统计诊断（胜率显著性 / IC稳定性 / VaR / 分布） =====
+    with st.expander("📐 专业统计诊断", expanded=False):
         _win_sig = res.attrs.get("stats_win_sig") or {}
         _stab = res.attrs.get("stats_factor_stab") or {}
         _var = res.attrs.get("stats_var") or {}
@@ -896,7 +896,7 @@ if run:
             # (b) 因子稳定性
             if _stab:
                 st.divider()
-                st.caption("🧬 因子稳定性（ICIR + 衰减率 · v1.24 新增）")
+                st.caption("🧬 因子稳定性（ICIR + 衰减率）")
                 _stab_rows = []
                 for _f, _s in sorted(_stab.items(),
                                      key=lambda kv: -(kv[1].get("icir", 0))):
