@@ -183,6 +183,75 @@ def auto_pick_count(capital: float) -> int:
     return max(1, int(capital // 1000))
 
 
+# ---------------- T+1 交易成本计算器（v1.49，纯函数无副作用） ----------------
+# 口径与 strategy.py backtest / allocate / best_plan 完全一致，避免两处算法漂移
+_COST_COMM_RATE = 0.00025      # 佣金 万2.5，双向
+_COST_MIN_COMM = 5.0           # 单笔最低佣金（元）——小本金的固定税
+_COST_STAMP_RATE = 0.0005      # 印花税 0.05%，仅卖出
+_COST_TRANSFER_RATE = 0.00001  # 过户费 0.001%，双向
+_COST_SLIPPAGE = 0.001         # 滑点 单边0.1%（回测口径：买上浮/卖下浮）
+_COST_MIN_CRIT = _COST_MIN_COMM / _COST_COMM_RATE   # 20000元：单笔低于此佣金按5元封底
+
+
+def cost_calculator(capital: float, price: float, n_stocks: int = 0) -> dict:
+    """T+1 一买一卖成本结构：给定本金/假设股价/持股只数，算费用与回本门槛。
+    纯计算、无网络、无 Streamlit 依赖，可离线单测。
+      逐笔计算最低佣金（每只票单独 max(5, amt×0.00025)），与 allocate/best_plan 同口径。
+      n_stocks<=0 时给"成本视角建议只数上限"=每只尽量≥2万避开最低佣金封底（1~20）。
+    返回 dict：crit/suggested_n/rows（多只数对比）/detail（选中只数明细）。"""
+    capital = max(float(capital or 0), 0.0)
+    price = max(float(price or 0), 0.01)
+    crit = _COST_MIN_CRIT
+
+    def _row(n: int) -> dict:
+        n = max(int(n), 1)
+        per_budget = capital / n
+        shares = int(per_budget / price // 100) * 100
+        if shares <= 0:
+            shares = 100                       # 小资金例外：至少1手（与 allocate 一致）
+        # 逐手递减直到"成交额+佣金"买得起（与 allocate 完全同口径）
+        while shares > 0:
+            _amt_try = shares * price
+            _buy_try = max(_amt_try * _COST_COMM_RATE, _COST_MIN_COMM) + _amt_try * _COST_TRANSFER_RATE
+            if _amt_try + _buy_try <= per_budget + 1e-9:
+                break
+            shares -= 100
+        if shares <= 0:
+            shares = 100                       # 极端兜底：连1手都买不起仍按1手展示
+        one_amt = shares * price               # 单只成交金额（不含费）
+        # 逐笔佣金：每只票单独触底判断（关键，汇总算会低估最低佣金）
+        buy_fee = sum(max(one_amt * _COST_COMM_RATE, _COST_MIN_COMM) + one_amt * _COST_TRANSFER_RATE
+                      for _ in range(n))
+        sell_fee = sum(max(one_amt * _COST_COMM_RATE, _COST_MIN_COMM)
+                       + one_amt * (_COST_STAMP_RATE + _COST_TRANSFER_RATE)
+                       for _ in range(n))
+        total_amt = one_amt * n
+        total_fee = buy_fee + sell_fee
+        slip = total_amt * _COST_SLIPPAGE * 2   # 双边滑点
+        fee_pct = total_fee / total_amt * 100 if total_amt > 0 else 0.0
+        be_pct = (total_fee + slip) / total_amt * 100 if total_amt > 0 else 0.0
+        invest = total_amt + buy_fee
+        return {
+            "只数": n, "每只股数": int(shares), "每只金额": round(one_amt, 2),
+            "总买入": round(total_amt, 2), "买入佣金": round(buy_fee, 2),
+            "卖出费用": round(sell_fee, 2), "往返合计": round(total_fee, 2),
+            "费用占比%": round(fee_pct, 3), "回本涨幅%": round(be_pct, 3),
+            "投入(含佣)": round(invest, 2), "剩余现金": round(capital - invest, 2),
+            "最低佣金封底": bool(one_amt < crit),
+        }
+
+    # 成本视角建议：本金够几只≥2万就最多几只（避开最低佣金惩罚），封顶20、至少1
+    suggested = max(1, min(20, int(capital // crit)))
+    cand_n = [1, 2, 3, 5, 8, 10, 20]
+    rows = [_row(n) for n in cand_n if n <= 20]
+    chosen = suggested if (n_stocks or 0) <= 0 else max(1, min(20, int(n_stocks)))
+    return {
+        "临界本金": crit, "建议只数": suggested, "选中只数": chosen,
+        "本金": capital, "假设股价": price,
+        "rows": rows, "detail": _row(chosen),
+    }
+
+
 # ========== 预写死功能（v1.8 全开，置信度折扣在调用处应用） ==========
 def _correlation_filter(ranked: pd.DataFrame, spot: pd.DataFrame,
                          threshold: float = 0.8, n_done: int = 0) -> pd.DataFrame:
