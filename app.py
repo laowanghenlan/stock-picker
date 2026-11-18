@@ -363,7 +363,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.27"     # v1.27 实盘台账自动回填(网页/邮件双入口)+修复首次回填dtype崩溃+网页展示真实IC；沿用 v1.26 复盘净额口径
+APP_VERSION = "v1.28"     # v1.28 定位改为宽候选池粗筛+对照：全部技术因子用上(IC门槛/相关性/因子数门槛放宽)+网页导出候选池CSV供外部精筛；沿用 v1.27 台账回填 + v1.26 复盘净额口径
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
@@ -874,6 +874,30 @@ if run:
                                 "预计亏损(元)": st.column_config.NumberColumn(format="%.1f")})
     st.caption("预计盈利/亏损 = 投入 × 该股历史平均每笔盈利率/亏损率（已扣交易成本）；"
                "盈利概率 = 回测胜率经贝叶斯收缩后的校准值（样本少时向50%收敛）。均为历史统计推算，不代表未来，不构成投资建议。")
+
+    # ---- v1.28 粗筛候选池导出：把通过回测+排雷的全部候选(含所有技术因子值)导出，供外部模型精筛 ----
+    with st.expander("📦 导出粗筛候选池（给外部模型精筛用）", expanded=False):
+        st.caption(f"本 web 定位=**宽候选池粗筛 + 对照基准**，不是精确预测。这里导出通过回测+排雷的 "
+                   f"**{len(ranked)} 只候选**及全部技术因子值，你可拿去外部更专业的模型做二次精筛。"
+                   "已纳入当前数据能算出的全部技术因子（动量/反转/波动/MACD/KDJ + P1候选）；"
+                   "换手率/估值/财报因子因免费行情无历史数据，不可用。")
+        # 挑出代码/名称/价格/评分 + 所有因子原始列 + 因子贡献列 + ML分
+        _exp_cols = ["代码", "名称", "现价", "总分", "行业", "扣费总收益", "胜率", "ML分"]
+        _factor_raw = [f for f in factors.ALL_FACTOR_COLS if f in ranked.columns]
+        _factor_contrib = [c for c in ranked.columns if c.startswith("因子_") and c.endswith("_贡献")]
+        _export = ranked.reindex(columns=list(dict.fromkeys(
+            _exp_cols + _factor_raw + _factor_contrib))).copy()
+        for _c in _export.columns:
+            if _export[_c].dtype.kind in "fc":
+                _export[_c] = _export[_c].round(4)
+        _ts = dt.datetime.now().strftime("%Y%m%d_%H%M")
+        st.dataframe(_export, width="stretch", hide_index=True)
+        st.download_button(
+            f"⬇️ 下载候选池 CSV（{len(_export)} 只 × {len(_export.columns)} 列）",
+            data=_export.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
+            file_name=f"粗筛候选池_{_ts}.csv", mime="text/csv")
+        st.caption("提示：T+1（今收买、明收卖）请自行按次日收盘价核对真实收益；"
+                   "本表总分为5日口径历史统计，超短线仅作对照，不构成买卖建议。")
 
     st.markdown("**照做就行：**")
     for _, p in plan.iterrows():
