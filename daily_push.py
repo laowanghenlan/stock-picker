@@ -62,7 +62,7 @@ IC_GATE = app.IC_GATE                                 # 训练期组合IC低于�
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.40"
+APP_VERSION = "v1.41"
 
 
 FONT = "-apple-system,'PingFang SC','Microsoft YaHei',Arial,sans-serif"
@@ -241,7 +241,7 @@ def _collect(precomputed=None, archive: bool = True) -> dict:
         _hf = res.attrs.get("hist_failed", [])
         _nf = res.attrs.get("news_failed", [])
         if _nf and len(_nf) >= len(cand):
-            d["note"] = "舆情数据源暂时不可用，候选股风险无法核实，今日不推荐（这不是选股结论），请稍后重试。"
+            d["note"] = "舆情数据源暂时不可用，候选股风险无法核实（这不是选股结论）。本次结果为空源于行情/回测环节，请稍后重试。"
         elif _hf and len(_hf) >= len(cand):
             d["note"] = "行情数据源暂时不可用（东财限流/新浪无有效返回），本次无法完成验证，不建议据此操作。"
         else:
@@ -256,7 +256,7 @@ def _collect(precomputed=None, archive: bool = True) -> dict:
         return d
     _nf = res.attrs.get("news_failed", [])
     if _nf:
-        d["news_warn"] = f"舆情接口异常，{len(_nf)} 只候选风险无法核实，已从推荐中剔除。"
+        d["news_warn"] = f"舆情接口暂时取不到数据，{len(_nf)} 只候选风险未核实，已降级放行（未剔除），买入前请自行核对最新公告。"
 
     mined = res[res["有雷"]]
     if len(mined) > 0:

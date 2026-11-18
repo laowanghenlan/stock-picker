@@ -369,7 +369,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.40"     # v1.40 按用户要求从页面去掉持仓体检(顶部expander+结果区体检表两处);持仓.csv与check_holdings逻辑保留本地可查,且省掉每次选股体检联网拉舆情;沿用 v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
+APP_VERSION = "v1.41"     # v1.41 舆情排雷改直连东财JSONP(绕开akshare列名漂移+8s硬超时,重试1次/15s)+双源失败降级放行并标注(不再剔票)+并发8→4;沿用 v1.40 去持仓体检+v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
@@ -577,8 +577,8 @@ if run:
         _hf = res.attrs.get("hist_failed", [])
         _nf = res.attrs.get("news_failed", [])
         if _nf and len(_nf) >= len(cands):
-            st.warning("舆情数据源暂时不可用，候选股风险无法核实，本次不推荐（这不是选股结论）。"
-                       "请稍后重试，不建议据此操作。")
+            st.warning("舆情数据源暂时不可用，候选股风险无法核实（这不是选股结论）。"
+                       "但本次结果为空是行情/回测环节所致，与舆情无关，请稍后重试。")
         elif _hf and len(_hf) >= len(cands):
             st.warning("行情数据源暂时不可用（东财限流、新浪未返回有效数据），本次无法完成验证。"
                        "这不是选股结论，请稍后重试，不建议据此操作。")
@@ -587,8 +587,9 @@ if run:
         st.stop()
     _nf = res.attrs.get("news_failed", [])
     if _nf:
-        st.caption(f"⚠️ 舆情接口异常，{len(_nf)} 只候选风险无法核实，已从推荐中剔除："
-                   f"{', '.join(_nf[:10])}{' 等' if len(_nf) > 10 else ''}")
+        st.caption(f"⚠️ 舆情接口暂时取不到数据，{len(_nf)} 只候选的风险未核实，已降级放行（未剔除）："
+                   f"{', '.join(_nf[:10])}{' 等' if len(_nf) > 10 else ''}。"
+                   "这批票的排雷结论不可用，买入前请自行核对最新公告。")
     # 舆情排雷通报：哪些因近7天利空新闻被排除
     mined = res[res["有雷"]]
     if len(mined) > 0:
@@ -854,6 +855,16 @@ if run:
 
     _headline = "🎯 今日 T+1 精筛最终名单" if _t1_applied else "今日选出"
     st.success(f"{_headline} {len(plan)} 只，方案如下：")
+    # v1.41：最终名单里若有舆情未核实的票，显著标注，提醒用户自行核对公告
+    if "舆情未核实" in ranked.columns:
+        _final_codes = set(plan["代码"].astype(str).str.zfill(6))
+        _unver = ranked[ranked["舆情未核实"] == True]  # noqa: E712
+        _unver_final = [f"{r['名称']}（{str(r['代码']).zfill(6)}）"
+                        for _, r in _unver.iterrows()
+                        if str(r["代码"]).zfill(6) in _final_codes]
+        if _unver_final:
+            st.warning("⚠️ 以下入选股票的舆情接口未取到数据、风险未核实（已降级放行，非利空确认），"
+                       "买入前请自行核对最新公告：" + "、".join(_unver_final))
     show = plan.drop(columns=["_win_prob", "_est_win", "_est_loss"])
     if _t1_applied and "精筛分" in ranked.columns:
         # 把 T+1 精筛分/排名按代码补进最终方案表（allocate 可能重排，用 map 对齐）

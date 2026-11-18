@@ -20,31 +20,68 @@ NEG_KEYWORDS = ("减持", "立案", "退市", "处罚", "问询", "警示", "冻
                 "违规", "诉讼", "仲裁", "预亏", "暴雷", "停牌", "质押", "担保逾期")
 
 
-def news_risk_impl(code: str) -> list | None:
-    """拉取该股最近新闻标题，返回近7天内命中利空关键词的标题列表。空列表=无雷。
-    接口失败/超时返回 None（不能当成"无雷"，由上层显式降级并告警）。
-    （无缓存装饰器，供裸运行脚本直接调用）"""
+def _em_news_direct(code: str) -> list | None:
+    """v1.41：直连东财新闻搜索 JSONP（就是 ak.stock_news_em 的底层接口），
+    自己解析、不依赖 akshare 的列名（避免版本漂移）与 8 秒硬超时。
+    失败重试 1 次，单次超时 15 秒。返回近7天利空标题；接口不可用返回 None。"""
+    import json as _json
+    code = re.sub(r"\D", "", str(code))[-6:]
+    cb = "jp" + str(int(time.time() * 1000))[-8:]
+    param = {
+        "uid": "", "keyword": code, "type": ["cmsArticleWebOld"],
+        "client": "web", "clientType": "web", "clientVersion": "curr",
+        "param": {"cmsArticleWebOld": {
+            "searchScope": "default", "sort": "time", "pageIndex": 1, "pageSize": 30}},
+    }
+    url = "https://search-api-web.eastmoney.com/search/jsonp"
+    txt = None
+    for _ in range(2):                              # 失败重试 1 次
+        try:
+            r = requests.get(
+                url,
+                params={"cb": cb, "param": _json.dumps(param, ensure_ascii=False,
+                                                       separators=(",", ":"))},
+                headers={"User-Agent": "Mozilla/5.0", "Referer": "https://so.eastmoney.com/"},
+                timeout=15)
+            if r.status_code == 200 and r.text:
+                txt = r.text
+                break
+        except Exception:
+            continue
+    if not txt:
+        return None
     try:
-        news = _run_with_timeout(ak.stock_news_em, symbol=code, timeout=8)
+        s = txt.strip()
+        i, j = s.find("("), s.rfind(")")
+        if i < 0 or j <= i:
+            return None
+        obj = _json.loads(s[i + 1:j])
+        arts = (obj.get("result") or {}).get("cmsArticleWebOld") or []
     except Exception:
         return None
-    if news is None:
-        return None
-    if len(news) == 0:
-        return []
     cutoff = pd.Timestamp.now() - pd.Timedelta(days=7)
     hits = []
-    for _, r in news.iterrows():
+    for a in arts:
         try:
-            t = pd.Timestamp(str(r["发布时间"]))
+            t = pd.Timestamp(str(a.get("date", "")))
         except Exception:
             continue
         if t < cutoff:
-            break                                # 新闻按时间倒序，超过7天即止
-        title = str(r["新闻标题"])
+            break                                  # 按时间倒序，超过7天即止
+        title = re.sub(r"<[^>]+>", "", str(a.get("title", "")))   # 去掉 <em> 高亮标签
         if any(k in title for k in NEG_KEYWORDS):
             hits.append(title)
     return hits
+
+
+def news_risk_impl(code: str) -> list | None:
+    """近7天利空新闻标题；空列表=无雷，None=接口失败。
+    v1.41：直连东财（重试+15s），不再走 akshare stock_news_em。
+    上层对 None 降级放行并标注，不再直接剔票。"""
+    try:
+        return _em_news_direct(code)
+    except Exception:
+        return None
 
 
 def market_temperature_impl() -> tuple:
@@ -840,7 +877,8 @@ def verify_impl(cands: pd.DataFrame, progress,
             n = _fetch_one_news(cd)
             return cd, h, n
 
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        # v1.41：8→4 路并发——8 路同时打东财极易触发限流，反而让舆情整批失败
+        with ThreadPoolExecutor(max_workers=4) as pool:
             for done, (cd, h, n) in enumerate(pool.map(_fetch_one, codes_all), 1):
                 hists_pre[cd], news_pre[cd] = h, n
                 progress(0.3 + 0.35 * done / total, f"并发下载K线+舆情 {done}/{total}")
@@ -875,9 +913,13 @@ def verify_impl(cands: pd.DataFrame, progress,
             fee = float(bs["累计手续费"].rstrip("元"))
             avg_win, avg_loss = _trade_stats(sig)
             risk_hits = news_pre[code] if code in news_pre else _fetch_one_news(code)  # 新闻+巨潮公告（优先用并发预取结果）
-            if risk_hits is None:                   # 舆情取数失败：风险未知，该票直接不推荐（fail-closed）
+            news_unverified = False
+            if risk_hits is None:
+                # v1.41 降级放行：双源都失败=风险未核实，不再直接剔票（避免接口抖动把好票全筛掉）。
+                # 保留该票参与后续回测/打分，仅记录名单并在结果里标注，由用户自行二次确认。
+                news_unverified = True
                 news_failed.append(code)
-                continue
+                risk_hits = []                      # 当作"无已知利空"继续，但标记未核实
             last = sig.iloc[-1]
             # 技术面硬条件：当前价在20日线上，且5日线在20日线上（趋势仍向上）
             # _fast/_slow 是信号表里的 MA5/MA20 列
@@ -913,13 +955,14 @@ def verify_impl(cands: pd.DataFrame, progress,
                 "行业": meta[code]["行业"],
                 "趋势向上": trend_ok,
                 "有雷": len(risk_hits) > 0, "利空标题": "；".join(risk_hits[:2]),
+                "舆情未核实": news_unverified,     # v1.41：True=接口失败降级放行，风险未经核实
             })
         except Exception:
             continue                                    # 单只失败不影响整体
         progress(0.65 + 0.35 * (i + 1) / total, f"回测验证中 {i + 1}/{total}：{r['名称']}")
     res = pd.DataFrame(rows)
     res.attrs["hist_failed"] = hist_failed      # 行情取数失败的候选（数据源问题，非选股结论）
-    res.attrs["news_failed"] = news_failed      # 舆情取数失败、风险无法核实而被剔除的候选
+    res.attrs["news_failed"] = news_failed      # v1.41：舆情双源失败、降级放行（未核实）的候选，仅告警不剔除
     res.attrs["n_cands"] = total
     # 因子IC检验：行业中性化 → 逐交易日横截面IC → 最近20日均值定权
     # 因子IC检验：优先用 wf_cache 全市场大面板（数百只×近千日，IC/ML更稳定），

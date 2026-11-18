@@ -281,7 +281,9 @@ def cninfo_risk_impl(code: str, days: int = 7) -> list | None:
     code = re.sub(r"\D", "", str(code))[-6:]
     org = _cninfo_org_map().get(code)
     if not org:
-        return []
+        # v1.41：orgId 映射拿不到=该股公告无法核实，返回 None（由上层降级放行并标注），
+        # 不再假装"无雷"返回 []，避免漏排雷。
+        return None
     end = dt.date.today()
     start = end - dt.timedelta(days=days)
     payload = {"pageNum": 1, "pageSize": 50, "column": "szse", "tabName": "fulltext",
