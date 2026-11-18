@@ -363,7 +363,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.29"     # v1.29 打通粗筛→精筛链路：导出候选池补当日快照字段(开盘/隔夜/换手/量比/市值/估值,修价格列bug)+新增 refine_pool.py T+1 LightGBM精筛器(含退市全A样本外+1.56%/期t7.57);沿用 v1.28 全部技术因子粗筛 + v1.27 台账回填 + v1.26 复盘净额
+APP_VERSION = "v1.30"     # v1.30 接入大智慧MCP资金流/龙虎榜做精筛辅助标注层(dzh_enrich.py,不进打分核心未验证)+资金流历史库积累;沿用 v1.29 粗筛→精筛链路 + v1.28 全部技术因子粗筛 + v1.27 台账回填 + v1.26 复盘净额
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
