@@ -777,11 +777,27 @@ def news_and_announcements(code: str) -> list | None:
     """舆情排雷 = 东财新闻 + 巨潮公告（法定信披，立案/处罚/减持更权威）。
     返回去重后的利空标题字符串列表；两个源都失败才返回 None（上层按"无雷"降级并标注）。
     注意：新闻源给的是标题字符串，公告源给的是 {"标题","日期","来源"} 字典，两者都要兼容。"""
-    n = news_risk_impl(code)
-    try:
-        a = cninfo_risk_impl(code, days=7)
-    except Exception:
-        a = None
+    # v1.42 提速：两源并行（原来串行等东财15s再等巨潮12s，现在取两者最大值）。
+    # 外层 verify_impl 已有 4 路候选并发，这里每只再开 2 路，总并发约 8，可接受。
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+
+    def _em():
+        try:
+            return news_risk_impl(code)
+        except Exception:
+            return None
+
+    def _cn():
+        try:
+            return cninfo_risk_impl(code, days=7)
+        except Exception:
+            return None
+
+    with _TPE(max_workers=2) as _ex:
+        _f_em = _ex.submit(_em)
+        _f_cn = _ex.submit(_cn)
+        n = _f_em.result()
+        a = _f_cn.result()
     if n is None and a is None:
         return None
     out = []

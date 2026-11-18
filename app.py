@@ -369,7 +369,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.41"     # v1.41 舆情排雷改直连东财JSONP(绕开akshare列名漂移+8s硬超时,重试1次/15s)+双源失败降级放行并标注(不再剔票)+并发8→4;沿用 v1.40 去持仓体检+v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
+APP_VERSION = "v1.42"     # v1.42 提速四项:舆情东财+巨潮双源并行+快照首源成功即返回(关多源串行对账)+行情缓存30min→2h+K线单源超时15s→8s;沿用 v1.41 舆情直连东财+降级放行+v1.40 去持仓体检+v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
@@ -542,7 +542,9 @@ if run:
     else:
         with st.spinner(f"正在获取最新行情（本地缓存：{_cache_tag}，云端首次约1~2分钟）..."):
             try:
-                if not spot_fresh_enough(1800):   # 30分钟内刷新过快照就跳过，省约1分钟
+                # v1.42 提速：30分钟→2小时。T+1选股对快照新鲜度不敏感（收盘后价格固定），
+                # 频繁重拉全市场反而每次多花1~2分钟；盘中要强制更新可清 spot_cache.csv。
+                if not spot_fresh_enough(7200):
                     refresh_spot()
             except Exception as e:
                 if _cache_tag == "无缓存":

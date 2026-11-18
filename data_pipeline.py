@@ -32,7 +32,7 @@ HERE = Path(__file__).parent
 
 # ========== 数据源超时与并发配置（集中可调，不再散在 data.py） ==========
 SPOT_TIMEOUT_PER_SOURCE = 45        # 单个源拉快照的最大等待（秒）
-HIST_TIMEOUT_PER_SOURCE = 15        # 单个源拉单只K线的最大等待（秒）
+HIST_TIMEOUT_PER_SOURCE = 8         # 单个源拉单只K线的最大等待（秒）· v1.42 15→8，正常秒回，8s未回即视为失败快速降级；东财另有独立5s硬超时不受此影响
 FUND_TIMEOUT_PER_SOURCE = 25        # 单个源拉一只基本面的最大等待（秒）
 TX_BATCH = 600                      # 腾讯批量接口单次请求股票数
 TX_WORKERS = 6                      # 腾讯快照并发数
@@ -612,13 +612,36 @@ class SourceRouter:
             self._by_type.setdefault(s.type, []).append(s)
 
     # ---------- 快照 ----------
-    def fetch_spot(self, reconcile: bool = True, primary: str | None = None) -> pd.DataFrame:
-        """全市场快照。primary 指定优先源，不指定则按健康度排。"""
+    def fetch_spot(self, reconcile: bool = False, primary: str | None = None) -> pd.DataFrame:
+        """全市场快照。primary 指定优先源，不指定则按健康度排。
+        v1.42 提速：默认首源成功即返回（原来串行拉全部4源做对账，每源超时45s，
+        一旦首个源慢，后续源白等；实测快照字段足够用，交叉校验收益不大）。
+        需要数据交叉校验时显式传 reconcile=True，仍走原"拉全部源+对账"路径。"""
         sources = self._rank_by_health(self._by_type.get("spot", []) +
                                        self._by_type.get("generic", []))
         if primary and primary in self._by_name:
             sources = [self._by_name[primary]] + [s for s in sources if s.name != primary]
 
+        if not reconcile:
+            # 快速路径：按健康度顺序试，第一个拿到有效数据的源直接返回
+            for src in sources:
+                if _get_tracker(src.name).metrics().should_skip():
+                    continue
+                t0 = time.time()
+                try:
+                    df = src.fetch_spot()
+                    latency_ms = (time.time() - t0) * 1000
+                    if df is not None and len(df) > 100:
+                        _get_tracker(src.name).record(True, latency_ms)
+                        df.attrs["reconciled_from"] = src.name
+                        df.attrs["reconcile_warnings"] = []
+                        return df
+                    _get_tracker(src.name).record(False, latency_ms)
+                except Exception:
+                    _get_tracker(src.name).record(False, (time.time() - t0) * 1000)
+            raise RuntimeError("所有快照源均失败")
+
+        # 原路径（reconcile=True）：拉全部源做交叉验证
         results: dict[str, pd.DataFrame] = {}
         for src in sources:
             if _get_tracker(src.name).metrics().should_skip():
@@ -642,8 +665,7 @@ class SourceRouter:
         primary_name = primary or sources[0].name
         primary_df = results[primary_name]
 
-        # 对账：第二源存在时做交叉验证，标记异常行
-        if reconcile and len(results) >= 2:
+        if len(results) >= 2:
             sec_name = next(n for n in results if n != primary_name)
             sec_df = results[sec_name]
             reconciled = self._reconcile_spot(primary_df, sec_df)
