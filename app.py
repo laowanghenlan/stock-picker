@@ -36,11 +36,6 @@ try:
     import t1_refine
 except Exception:
     t1_refine = None
-# v1.34: 大智慧资金流对照客户端（纯标准库，KEY 直连；仅对照不进打分核心）
-try:
-    import dzh_mcp_http
-except Exception:
-    dzh_mcp_http = None
 # 选股引擎统一放在 screen_service（纯 Python，无 Streamlit 依赖）；
 # 这里显式导入，保证 app.xxx 在测试/脚本里沿用原名字
 from screen_service import (CANDIDATES, CANDIDATES_PUSH, HISTORY_DAYS, IC_GATE, MAX_PRICE, MIN_PRICE, ML_WEIGHT,
@@ -374,40 +369,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-def _dzh_fundflow_contrast(codes, key):
-    """v1.34: 用大智慧 KEY 直连拉资金流+龙虎榜，返回对照 DataFrame；失败返回 (None, 原因)。
-    仅人工对照，不进打分核心。codes 为 6 位数字代码列表，key 为会话内 KEY。"""
-    if dzh_mcp_http is None:
-        return None, "资金流客户端不可用（dzh_mcp_http 未加载）"
-    try:
-        cli = dzh_mcp_http.DzhMcpClient(key)
-        cli.initialize()  # 握手（list_tools 非必需，省一次请求）
-        dz_codes = [dzh_mcp_http.to_dz(c) for c in codes]
-        dz_codes = [c for c in dz_codes if c]
-        if not dz_codes:
-            return None, "没有有效股票代码"
-        flow = cli.capital_inflow_min(dz_codes)
-        lhb = cli.lhb_last_month(dz_codes)
-        rows = []
-        for c6, dz in zip([str(c).zfill(6) for c in codes], dz_codes):
-            f = flow.get(dz, {}) or {}
-            l = lhb.get(dz, {}) or {}
-            zl = f.get("主力净流入")
-            zl_wan = round(zl / 1e4, 1) if isinstance(zl, (int, float)) else None
-            rows.append({
-                "代码": c6,
-                "主力净流入(万)": zl_wan,
-                "特大单(万)": round(f["特大单"] / 1e4, 1) if isinstance(f.get("特大单"), (int, float)) else None,
-                "近月龙虎榜次数": l.get("次数"),
-                "最近上榜日": l.get("最近上榜日") or "",
-                "资金时点": f.get("时间") or "",
-            })
-        return pd.DataFrame(rows), ""
-    except Exception as e:
-        return None, f"{type(e).__name__}: {str(e)[:120]}"
-
-
-APP_VERSION = "v1.38"     # v1.38 web提速:默认跳过15只串行baostock财报拉取(config观测→拉取财报=false,基本面因子实测几乎无效)+去掉首屏联网健康探测,点选股省最多5分钟/首屏秒开;沿用 v1.37 隐藏台账+v1.36 清v1.24标签+v1.35 云端KEY修复+v1.34 资金流对照+v1.33 KEY直连+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
+APP_VERSION = "v1.39"     # v1.39 按用户要求从页面去掉大智慧资金流对照(KEY设置区+结果对照展示,独立脚本dzh_mcp_http.py/dzh_enrich.py与云端Secrets保留,自己本地用);沿用 v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
@@ -576,32 +538,6 @@ with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}批）", expanded=F
 # ---------------- 页面：一个按钮 + 一张结果表 ----------------
 st.caption(f"本金 {capital:.0f} 元 · 只数由本金+预期收益自动优化 · 股价上限 {MAX_PRICE:.1f} 元 · "
            "已内置手续费（佣金万2.5，单笔最低5元；印花税0.05%卖出收取；含过户费/滑点）")
-
-# ---- v1.34: 大智慧资金流对照 · KEY 设置（只存会话内存，不落盘/不入仓） ----
-# 云端取 KEY 优先级：st.secrets["DZH_MCP_KEY"] > 本页面输入框。
-# 输入框用 password 类型且不带持久 key，刷新即失效；绝不写文件、绝不进 Git。
-def _dzh_secret_key():
-    try:
-        return (st.secrets.get("DZH_MCP_KEY") or "").strip()
-    except Exception:
-        return ""
-
-with st.expander("💰 大智慧资金流对照（选填 · 主力资金/龙虎榜，仅对照不进打分）", expanded=False):
-    st.caption("选填：填入你在 [大智慧商城](https://pay.dzh.com.cn/pay-mall/mcp) 免费领的 KEY，"
-               "点「今日选股」即可在结果里一并看到每只票的主力净流入/特大单/龙虎榜对照。"
-               "KEY 只在本页面会话内使用，**不落盘、不进代码仓库**；也可由部署者在云端 Secrets 配 `DZH_MCP_KEY` 一劳永逸。"
-               "资金流为当日截面、无历史验证，仅人工对照，不构成投资建议。")
-    _dzh_secret = _dzh_secret_key()
-    if _dzh_secret:
-        st.success("✅ 已检测到云端 KEY（Secrets `DZH_MCP_KEY`）：点「今日选股」会自动带出资金流对照，无需在下方填写。"
-                   f"（KEY 尾号 …{_dzh_secret[-4:]}，仅显示尾号用于核对）")
-    else:
-        st.info("ℹ️ 未检测到云端 KEY。可在下方粘贴使用本次会话；或到 Streamlit 后台 Secrets 配 `DZH_MCP_KEY` 一劳永逸。留空则跳过资金流对照，不影响选股。")
-    _dzh_input = st.text_input("大智慧 KEY（sk_dzh_ 开头；留空=用云端KEY或跳过）",
-                               type="password", key="_dzh_key_box",
-                               placeholder="sk_dzh_...  留空=用云端KEY")
-    # 空输入自动回退到云端 KEY，避免手滑清空把云端 KEY 覆盖掉（v1.35 修隐患）
-    st.session_state["_dzh_key"] = (_dzh_input or "").strip() or _dzh_secret
 
 run = st.button("🔍 今日选股", type="primary", width='stretch')
 
@@ -951,41 +887,6 @@ if run:
                                 "预计亏损(元)": st.column_config.NumberColumn(format="%.1f")})
     st.caption("预计盈利/亏损 = 投入 × 该股历史平均每笔盈利率/亏损率（已扣交易成本）；"
                "盈利概率 = 回测胜率经贝叶斯收缩后的校准值（样本少时向50%收敛）。均为历史统计推算，不代表未来，不构成投资建议。")
-
-    # ---- v1.34: 大智慧资金流对照（选填；有 KEY 才拉，失败不阻塞选股主流程）----
-    _dzh_key_now = (st.session_state.get("_dzh_key") or "").strip()
-    if _dzh_key_now:
-        with st.spinner("正在拉取大智慧资金流/龙虎榜对照…"):
-            _fdf, _ferr = _dzh_fundflow_contrast(plan["代码"].astype(str).tolist(), _dzh_key_now)
-        if _fdf is not None:
-            # 用名称 + T+1排名补齐展示，并按"技术靠前但主力流出"给出提示
-            _meta = plan.set_index(plan["代码"].astype(str).str.zfill(6))
-            _fdf["代码"] = _fdf["代码"].astype(str).str.zfill(6)
-            _fdf["名称"] = _fdf["代码"].map(_meta["名称"]) if "名称" in _meta.columns else ""
-            if _t1_applied and "T+1排名" in _meta.columns:
-                _fdf["T+1排名"] = _fdf["代码"].map(_meta["T+1排名"])
-            def _flow_sig(v):
-                if not isinstance(v, (int, float)) or v != v:
-                    return "无资金数据"
-                if v > 5000: return "主力大幅流入"
-                if v > 0: return "主力流入"
-                if v > -5000: return "主力流出"
-                return "主力大幅流出"
-            _fdf["资金信号"] = _fdf["主力净流入(万)"].map(_flow_sig)
-            _fdf["对照提示"] = _fdf.apply(
-                lambda r: "⚠技术靠前但主力流出" if ("T+1排名" in _fdf.columns
-                          and isinstance(r.get("T+1排名"), (int, float)) and r["T+1排名"] <= 5
-                          and isinstance(r["主力净流入(万)"], (int, float)) and r["主力净流入(万)"] < 0) else "", axis=1)
-            _show_cols = [c for c in ["代码", "名称", "T+1排名", "主力净流入(万)", "特大单(万)",
-                                      "资金信号", "近月龙虎榜次数", "最近上榜日", "对照提示"] if c in _fdf.columns]
-            with st.expander("💰 大智慧资金流对照（仅人工对照，不进打分核心）", expanded=True):
-                st.dataframe(_fdf[_show_cols], width="stretch", hide_index=True)
-                st.caption("主力净流入为当日/近期截面，大智慧口径；资金流/龙虎榜**未经含退市历史验证，不进打分、不改变上面的选股顺序**，"
-                           "仅供你人工判断。⚠=技术排名靠前但主力资金流出，需留意。数据仅供参考，不构成投资建议。")
-        else:
-            st.caption(f"💰 资金流对照未取到（{_ferr}），不影响上面的选股结果。可检查 KEY 是否有效或稍后再试。")
-    elif _dzh_secret_key():
-        st.caption("💰 已配置云端资金流 KEY，但本次未取到对照数据。")
 
     # ---- 粗筛候选池导出：全部候选(含技术因子值 + v1.29当日快照字段)导出，供 refine_pool.py 精筛 ----
     with st.expander("📦 导出粗筛候选池（给外部模型精筛用）", expanded=False):
