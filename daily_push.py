@@ -62,7 +62,7 @@ IC_GATE = app.IC_GATE                                 # 训练期组合IC低于�
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.51.1"   # 与 app.py 同步（v1.51.1 P0止血:减持标签改软导入防白屏；邮件逻辑未动）
+APP_VERSION = "v1.51.2"   # 与 app.py 同步（v1.51.2 P0修复:c4.metric缺value参数TypeError白屏；邮件逻辑未动）
 
 
 FONT = "-apple-system,'PingFang SC','Microsoft YaHei',Arial,sans-serif"
