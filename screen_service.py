@@ -3,6 +3,7 @@
 import datetime as dt
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -83,6 +84,61 @@ def news_risk_impl(code: str) -> list | None:
         return _em_news_direct(code)
     except Exception:
         return None
+
+
+def reduce_label_impl(codes, lookback_days: int = 90) -> dict:
+    """v1.51：候选股"股东减持"标签（**纯展示，不参与选股/打分/排序/排雷**）。
+    用东财 RPT_SHARE_HOLDER_INCREASE 一次请求批量拉近 lookback_days 天减持明细，
+    按代码聚合累计减持占总股本比例(AFTER_CHANGE_RATE)、笔数、最新公告日。
+    返回 {6位代码: {"ratio":累计减持%, "n":笔数, "last_date":"YYYY-MM-DD"}}。
+    用正确字段 AFTER_CHANGE_RATE（不是报价涨跌幅 CHANGE_RATE）。
+    失败/超时降级返回 {}（标签显示"—"），绝不影响选股主流程。"""
+    codes = [str(c).zfill(6) for c in codes if c is not None]
+    codes = list(dict.fromkeys(codes))       # 去重保序
+    if not codes:
+        return {}
+    # 分批，避免 URL 过长（每批≤50只）
+    out: dict = {}
+    url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://data.eastmoney.com/"}
+    start = (dt.date.today() - dt.timedelta(days=lookback_days)).isoformat()
+    for k in range(0, len(codes), 50):
+        batch = codes[k:k + 50]
+        code_in = ",".join(f'"{c}"' for c in batch)
+        filt = (f'(DIRECTION="减持")(NOTICE_DATE>=\'{start}\')'
+                f'(SECURITY_CODE in ({code_in}))')
+        params = {
+            "sortColumns": "NOTICE_DATE", "sortTypes": "-1",
+            "pageSize": 500, "pageNumber": 1,
+            "reportName": "RPT_SHARE_HOLDER_INCREASE",
+            "columns": "ALL", "source": "WEB", "client": "WEB",
+            "filter": filt,
+        }
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=12)
+            j = r.json()
+            res = j.get("result") or {}
+            data = res.get("data") or []
+        except Exception:
+            continue
+        for x in data:
+            code = str(x.get("SECURITY_CODE", "")).zfill(6)
+            if code not in codes:
+                continue
+            ratio = x.get("AFTER_CHANGE_RATE")     # 本次减持占总股本%
+            try:
+                ratio = abs(float(ratio))
+            except (TypeError, ValueError):
+                ratio = 0.0
+            notice = str(x.get("NOTICE_DATE", ""))[:10]
+            d = out.setdefault(code, {"ratio": 0.0, "n": 0, "last_date": ""})
+            d["ratio"] += ratio
+            d["n"] += 1
+            if notice > d["last_date"]:
+                d["last_date"] = notice
+    for code in out:
+        out[code]["ratio"] = round(out[code]["ratio"], 3)
+    return out
 
 
 def market_temperature_impl() -> tuple:
