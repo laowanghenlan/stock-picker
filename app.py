@@ -44,13 +44,20 @@ from screen_service import (CANDIDATES, CANDIDATES_PUSH, HISTORY_DAYS, IC_GATE, 
                             _confidence, _correlation_filter, _kelly_position, _num,
                             _run_with_timeout, allocate, auto_pick_count, best_plan, cost_calculator,
                             check_holdings, lhb_codes_impl, load_holdings, load_settings,
-                            market_temperature_impl, news_risk_impl, pick_top3, reduce_label_impl,
+                            market_temperature_impl, news_risk_impl, pick_top3,
                             review_conclusion, review_impl, screen_impl, verify_impl)
+# v1.51.1 P0止血：减持标签是纯展示功能，改为软导入。增量部署中间态下若云端
+# screen_service 还是旧版(无此函数)，硬导入会抛 ImportError 拖垮整个 app 白屏。
+try:
+    from screen_service import reduce_label_impl
+except Exception:
+    reduce_label_impl = None
 
 # 缓存包装：web UI 一律调 news_risk；GitHub Actions 等裸运行环境请调 news_risk_impl
 news_risk = st.cache_data(ttl=3600, show_spinner=False)(news_risk_impl)
 # v1.51 股东减持标签：缓存1小时（减持公告按日更新，无需每次选股都拉），纯展示不影响选股
-reduce_labels = st.cache_data(ttl=3600, show_spinner=False)(reduce_label_impl)
+reduce_labels = (st.cache_data(ttl=3600, show_spinner=False)(reduce_label_impl)
+                 if reduce_label_impl is not None else lambda codes: {})
 
 # 缓存包装：web UI 一律调 market_temperature；裸运行环境请调 market_temperature_impl
 market_temperature = st.cache_data(ttl=3600, show_spinner="正在检查大盘温度...")(market_temperature_impl)
@@ -376,7 +383,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.51"     # v1.51 结果表加"股东减持"标签(纯展示):按入选股代码查东财RPT_SHARE_HOLDER_INCREASE近90天减持,用正确字段AFTER_CHANGE_RATE(非报价涨跌幅CHANGE_RATE)聚合累计减持占股本%+笔数,显示"减持X.XX%·N笔"/"—";失败降级—不影响选股。缓存1h。顺带修复screen_service漏import re(_em_news_direct用re.sub却从未导入→NameError被吞→舆情排雷一直静默失效,补import re后恢复)。纯展示不改选股/打分/排序/排雷。前版 v1.50 把成本计算器集成进选股结果区(用户要求"点今日选股后在股票只数这加进去"):删除v1.49独立折叠面板,改为在"今日选出N只"前用本次真实plan逐笔算——4个metric(往返费用/回本涨幅门槛含双边滑点/费用占买入/本次只数vs成本最优只数)+触底佣金告警+「不同只数成本对比」折叠表(按本次均价试算供对照不改方案);卖出费用逐笔按max(5,amt×0.00025)+印花税+过户费算(大额单只更准);纯展示不改选股/打分/精筛/风控。沿用 v1.49 新增「T+1交易成本计算器」折叠面板:输入本金/股价/只数,实时算往返总费用(佣金万2.5最低5元+印花税0.05%卖出+过户费0.001%双向)、回本涨幅门槛(含双边滑点0.1%)、费用占比、成本视角最优只数(单笔≥2万避开5元佣金封底)、多只数对比表;纯本地计算screen_service.cost_calculator无副作用,口径与allocate/best_plan一致,不改选股/打分/精筛/风控。沿用 v1.48 P0修复线上KeyError:REVIEW_CACHE_KEY v1.22→v1.48强制st.cache_data旧复盘缓存失效(旧缓存无「当时盈利概率」列,g[_cols]报错整页白屏)+app展示前兜底缺列补—;沿用 v1.47 邮件历史表现也显示盈利概率:复盘明细/上一次推送卡片的文本版+HTML版四段渲染都补上「当时概率」列(v1.46只加了数据字段没接渲染层,邮件看不到);沿用 v1.46 历史复盘加「当时盈利概率」列:推送留档存下当时的校准盈利概率(web端app.py+邮件端daily_push.py两条路径)+复盘表与盈亏%并排对照,旧批次无留档显示—不编造;沿用 v1.45 价格带严格生效:去掉CSI成分股价格上限豁免(旧逻辑让100~500元高价股也进池)+下限5→8元+页面显示完整区间8~50;沿用 v1.44 改名老王每日选股+v1.43 P0修复(漏import numpy致选股恒空)+v1.42 提速四项+v1.41 舆情直连降级放行+v1.40 去持仓体检+v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
+APP_VERSION = "v1.51.1"   # v1.51.1 P0止血:减持标签改软导入try/except,防增量部署中间态(云端screen_service旧版无此函数)抛ImportError拖垮整页白屏;函数缺失时标签显示—。前版 v1.51 结果表加"股东减持"标签(纯展示):按入选股代码查东财RPT_SHARE_HOLDER_INCREASE近90天减持,用正确字段AFTER_CHANGE_RATE(非报价涨跌幅CHANGE_RATE)聚合累计减持占股本%+笔数,显示"减持X.XX%·N笔"/"—";失败降级—不影响选股。缓存1h。顺带修复screen_service漏import re(_em_news_direct用re.sub却从未导入→NameError被吞→舆情排雷一直静默失效,补import re后恢复)。纯展示不改选股/打分/排序/排雷。前版 v1.50 把成本计算器集成进选股结果区(用户要求"点今日选股后在股票只数这加进去"):删除v1.49独立折叠面板,改为在"今日选出N只"前用本次真实plan逐笔算——4个metric(往返费用/回本涨幅门槛含双边滑点/费用占买入/本次只数vs成本最优只数)+触底佣金告警+「不同只数成本对比」折叠表(按本次均价试算供对照不改方案);卖出费用逐笔按max(5,amt×0.00025)+印花税+过户费算(大额单只更准);纯展示不改选股/打分/精筛/风控。沿用 v1.49 新增「T+1交易成本计算器」折叠面板:输入本金/股价/只数,实时算往返总费用(佣金万2.5最低5元+印花税0.05%卖出+过户费0.001%双向)、回本涨幅门槛(含双边滑点0.1%)、费用占比、成本视角最优只数(单笔≥2万避开5元佣金封底)、多只数对比表;纯本地计算screen_service.cost_calculator无副作用,口径与allocate/best_plan一致,不改选股/打分/精筛/风控。沿用 v1.48 P0修复线上KeyError:REVIEW_CACHE_KEY v1.22→v1.48强制st.cache_data旧复盘缓存失效(旧缓存无「当时盈利概率」列,g[_cols]报错整页白屏)+app展示前兜底缺列补—;沿用 v1.47 邮件历史表现也显示盈利概率:复盘明细/上一次推送卡片的文本版+HTML版四段渲染都补上「当时概率」列(v1.46只加了数据字段没接渲染层,邮件看不到);沿用 v1.46 历史复盘加「当时盈利概率」列:推送留档存下当时的校准盈利概率(web端app.py+邮件端daily_push.py两条路径)+复盘表与盈亏%并排对照,旧批次无留档显示—不编造;沿用 v1.45 价格带严格生效:去掉CSI成分股价格上限豁免(旧逻辑让100~500元高价股也进池)+下限5→8元+页面显示完整区间8~50;沿用 v1.44 改名老王每日选股+v1.43 P0修复(漏import numpy致选股恒空)+v1.42 提速四项+v1.41 舆情直连降级放行+v1.40 去持仓体检+v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
 
 st.set_page_config(page_title="老王每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
