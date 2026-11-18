@@ -16,3 +16,5 @@ wf_cache/
 # 本地 DuckDB 数仓（体积大，可由数据管道重建）
 *.duckdb
 *.duckdb.wal
+# 实盘台账回填节流标记（本机状态，不入库存档）
+.oos_last_update

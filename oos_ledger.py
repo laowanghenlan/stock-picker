@@ -53,7 +53,33 @@ def _read() -> pd.DataFrame:
     for c in COLS:
         if c not in df.columns:
             df[c] = np.nan
+    # 整列为空时 pandas 3.1 读成 float64，写入日期字符串会报 LossySetitemError。
+    # 回填日是文本列，强制转字符串（NaN→空串），否则第一次回填必崩。
+    df["回填日"] = df["回填日"].fillna("").astype(str).replace("nan", "")
+    df["代码"] = df["代码"].astype(str).str.zfill(6)
     return df[COLS]
+
+
+def _last_update_stamp() -> Path:
+    """回填节流标记：一天最多真正联网回填一次，避免云端每次页面刷新都拉60只股票日线。"""
+    return HERE / ".oos_last_update"
+
+
+def update_due(force: bool = False) -> int:
+    """带节流壳：同一自然日已回填过就跳过。返回本次回填字段数。"""
+    stamp = _last_update_stamp()
+    if not force and stamp.exists():
+        try:
+            if stamp.read_text(encoding="utf-8").strip() == dt.date.today().isoformat():
+                return 0
+        except Exception:
+            pass
+    n = update()
+    try:
+        stamp.write_text(dt.date.today().isoformat(), encoding="utf-8")
+    except Exception:
+        pass
+    return n
 
 
 def record(date_str: str, time_str: str, picks: list[dict]) -> None:
@@ -89,7 +115,9 @@ def update() -> int:
             p0 = float(r["推荐价"])
         except Exception:
             continue
-        if p0 <= 0 or (today - rec.date()).days < 7:      # 5个交易日≈7自然日
+        # 不再用自然日门槛（7天会误卡：周三推送→下周三才够，实际5个交易日只要到下周二）。
+        # 直接看"推荐日之后有几个交易日"，够几个填几个，日期不足自然填不上。
+        if p0 <= 0:
             continue
         code = str(r["代码"]).zfill(6)
         if code not in cache:
@@ -98,13 +126,17 @@ def update() -> int:
         if len(s) == 0:
             continue
         fut = s[s.index > rec]
+        touched = False
         if need5 and len(fut) >= 5:
             df.at[i, "实际5日收益%"] = round((float(fut.iloc[4]) / p0 - 1) * 100, 2)
             filled += 1
+            touched = True
         if need10 and len(fut) >= 10:
             df.at[i, "实际10日收益%"] = round((float(fut.iloc[9]) / p0 - 1) * 100, 2)
-            df.at[i, "回填日"] = today.strftime("%Y-%m-%d")
             filled += 1
+            touched = True
+        if touched:                       # 5日或10日任一新填，就记回填日
+            df.at[i, "回填日"] = today.strftime("%Y-%m-%d")
     if filled:
         df.to_csv(LEDGER, index=False, encoding="utf-8-sig")
     return filled
@@ -138,10 +170,11 @@ def ic_stats() -> tuple[pd.DataFrame, str]:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--update", action="store_true", help="回填到期的5/10日收益")
+    ap.add_argument("--update", action="store_true", help="回填到期的5/10日收益（一天最多一次）")
+    ap.add_argument("--force", action="store_true", help="忽略当天节流，强制回填")
     a = ap.parse_args()
-    if a.update:
-        n = update()
+    if a.update or a.force:
+        n = update_due(force=a.force)
         print(f"本次回填 {n} 个字段")
     det, txt = ic_stats()
     print(txt)

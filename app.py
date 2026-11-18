@@ -94,6 +94,13 @@ if not st.session_state.get("_health_probed"):
     _probe_pipeline()
     st.session_state["_health_probed"] = True
     st.session_state["_health_last_update"] = time.time()
+    # 实盘台账自动回填（一天最多一次，内部节流。云端/本地打开页面即触发，
+    # 这样即使某天没发邮件，只要有人看过页面，到期的5/10日收益也会被补齐）
+    try:
+        import oos_ledger
+        oos_ledger.update_due()
+    except Exception:
+        pass
 
 
 def send_email_with_results(plan, mined, capital, leftover, cold, idx_close, idx_ma60):
@@ -165,6 +172,19 @@ def send_email_with_results(plan, mined, capital, leftover, cold, idx_close, idx
             rec.insert(1, "推送时间", daily_push._now_hm())   # 同一天多次推送靠它分批
             rec["大盘标签"] = d["tag"]
             daily_push._append_log(rec)                       # 统一整表重写，避免追加时列错位
+            # 实盘 OOS 台账：网页端推送也要记一份评分+推荐价，否则网页发的推荐
+            # 永远进不了台账，真实IC样本量始终是0（与定时邮件口径一致）
+            try:
+                import oos_ledger
+                _score_col = next((c for c in ("总分", "评分", "盈利概率", "综合评分")
+                                   if c in plan.columns), None)
+                oos_ledger.record(d["date"], rec["推送时间"].iloc[0], [
+                    {"代码": p["代码"], "名称": p["名称"],
+                     "评分": float(p[_score_col]) if _score_col and pd.notna(p.get(_score_col)) else None,
+                     "现价": float(p["现价"])}
+                    for _, p in plan.iterrows()])
+            except Exception as _oe:
+                print("OOS台账记录(网页端)失败(不影响推送):", _oe)
         except Exception:
             pass
         return True, f"已发送到 {os.environ['QQ_EMAIL']}"
@@ -343,7 +363,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.26"     # v1.26 修正复盘盈亏额：扣除真实手续费(佣金最低5元/印花税/过户费)，盈亏%改净收益率，胜率按净额判
+APP_VERSION = "v1.27"     # v1.27 实盘台账自动回填(网页/邮件双入口)+修复首次回填dtype崩溃+网页展示真实IC；沿用 v1.26 复盘净额口径
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
@@ -504,6 +524,41 @@ with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}批）", expanded=F
             st.caption("💰 盈亏额=卖出到手−买入成本，已扣佣金(单笔最低5元)、印花税、过户费"
                        "（每笔约10元固定成本）；费用列可核对。涨跌%是纯价格涨跌，盈亏%是扣费后的净收益率，"
                        "胜率按盈亏额正负统计——小额盈利扣费后转亏的，不计为胜。")
+
+# ---------------- 实盘 OOS 台账（预测口径：事后按5/10日收益算真实IC，验证回测优势还剩多少） ----------------
+with st.expander("🧪 实盘 OOS 台账 · 真实IC（自动回填，累计中）", expanded=False):
+    _oos_btn = st.button("🔄 刷新台账 / 立即回填", key="refresh_oos")
+    if _oos_btn:
+        try:
+            import oos_ledger
+            _n = oos_ledger.update_due(force=True)
+            st.caption(f"本次新回填 {_n} 个字段")
+        except Exception as _e:
+            st.caption(f"回填失败：{_e}")
+    try:
+        import oos_ledger
+        _oos_df = oos_ledger._read()
+        _det, _txt = oos_ledger.ic_stats()
+        st.caption(_txt)
+        if len(_oos_df):
+            _filled5 = int(_oos_df["实际5日收益%"].notna().sum())
+            _filled10 = int(_oos_df["实际10日收益%"].notna().sum())
+            p1, p2, p3 = st.columns(3)
+            p1.metric("预测总数", f"{len(_oos_df)} 条")
+            p2.metric("已回填5日", f"{_filled5} 条")
+            p3.metric("已回填10日", f"{_filled10} 条")
+            st.caption("台账只记当时评分与推荐价，满5/10个交易日自动拉收盘价回填；"
+                       "同一批次≥5只才算一次横截面IC。样本攒够30+批次后，真实IC才有统计意义——"
+                       "这是唯一能验证\"回测优势在实盘还剩多少\"的硬数据。")
+            if len(_det):
+                st.dataframe(_det, width="stretch", hide_index=True)
+                st.caption(f"真实IC均值 {_det['IC'].mean():+.4f}，为正 {(_det['IC'] > 0).sum()}/{len(_det)} 批。"
+                           "对比网页上方样本外IC：差距越大，说明回测里的优势越多来自历史拟合。")
+            else:
+                st.info("还没到能算IC的批次（需同批≥5只且满5个交易日）。最早一批 11-12 推送，"
+                        "满5个交易日后自动回填，届时这里会出现真实IC。")
+    except Exception as _e:
+        st.caption(f"台账读取失败：{_e}")
 
 # ---------------- 页面：一个按钮 + 一张结果表 ----------------
 st.caption(f"本金 {capital:.0f} 元 · 只数由本金+预期收益自动优化 · 股价上限 {MAX_PRICE:.1f} 元 · "

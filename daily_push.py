@@ -62,7 +62,7 @@ IC_GATE = app.IC_GATE                                 # 训练期组合IC低于�
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.26"
+APP_VERSION = "v1.27"
 
 
 FONT = "-apple-system,'PingFang SC','Microsoft YaHei',Arial,sans-serif"
@@ -193,8 +193,11 @@ def _archive(d: dict) -> None:
     try:
         import oos_ledger
         oos_ledger.record(date_str, ptime, ledger_rows)
+        # 顺手回填到期的历史样本：真实IC才是判断因子好不好用的唯一硬证据。
+        # 用带节流的壳，一天最多联网一次，不拖慢推送。
+        oos_ledger.update_due()
     except Exception as e:
-        print("OOS台账记录失败(不影响推送):", e)
+        print("OOS台账记录/回填失败(不影响推送):", e)
 
 
 def _collect(precomputed=None, archive: bool = True) -> dict:
