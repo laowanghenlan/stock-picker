@@ -62,7 +62,7 @@ IC_GATE = app.IC_GATE                                 # 训练期组合IC低于�
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.46"
+APP_VERSION = "v1.47"
 
 
 FONT = "-apple-system,'PingFang SC','Microsoft YaHei',Arial,sans-serif"
@@ -176,7 +176,9 @@ def build_last_batch(rv: pd.DataFrame) -> dict | None:
         g = g[g["推送时间"] == tms[-1]]
     rows = [{"名称": str(x["名称"]), "推荐价": float(x["推荐价"]), "现价": float(x["现价"]),
              "股数": int(float(x.get("股数", 0) or 0)),
-             "盈亏%": float(x["盈亏%"]), "盈亏额": float(x["_盈亏额"]), "结果": str(x["结果"])}
+             "盈亏%": float(x["盈亏%"]), "盈亏额": float(x["_盈亏额"]), "结果": str(x["结果"]),
+             # v1.47 当时盈利概率：旧批次无留档显示"—"，不编造
+             "当时盈利概率": str(x.get("当时盈利概率", "—"))}
             for _, x in g.iterrows()]
     return {"date": day, "time": tms[-1] if tms else "", "rows": rows,
             "pnl": float(g["_盈亏额"].sum()),
@@ -323,7 +325,8 @@ def _last_text_lines(lb: dict) -> list:
     _when = f"{lb['date']} {lb['time']}" if lb["time"] else lb["date"]
     out = ["", f"【上一次推送 {_when} · {len(lb['rows'])} 只】现在怎么样："]
     for x in lb["rows"]:
-        out.append(f"  {x['名称']} {x['股数']} 股 | 推荐 {x['推荐价']:.2f} → 现价 {x['现价']:.2f}  "
+        out.append(f"  {x['名称']} {x['股数']} 股 | 当时概率 {x.get('当时盈利概率', '—')} | "
+                   f"推荐 {x['推荐价']:.2f} → 现价 {x['现价']:.2f}  "
                    f"{x['盈亏%']:+.1f}%（{x['盈亏额']:+.0f} 元）  {x['结果']}")
     out.append(f"  合计 {lb['pnl']:+.0f} 元（盈利 {lb['wins']} 只 / 亏损 {lb['losses']} 只）")
     return out
@@ -397,7 +400,8 @@ def _render_text(d: dict) -> str:
         if r["bench"] is not None:
             lines.append(f"同期沪深300平均 {r['bench']:+.1f}% | 平均超额 {r['excess']:+.1f}%")
         for x in r["rows"]:
-            lines.append(f"  {x['日期']} {x['名称']} {x['股数']} 股 | 推荐价 {x['推荐价']:.2f} → 现价 {x['现价']:.2f} "
+            lines.append(f"  {x['日期']} {x['名称']} {x['股数']} 股 | 当时概率 {x.get('当时盈利概率', '—')} | "
+                         f"推荐价 {x['推荐价']:.2f} → 现价 {x['现价']:.2f} "
                          f"{x['结果']} {x['盈亏%']:+.1f}%（{x['盈亏额']:+.0f} 元）")
         lines.append("结论：" + r["conclusion"])
 
@@ -426,12 +430,15 @@ def _last_html(lb: dict) -> str:
          "style=\"font-size:12.5px;color:#57606a;border-collapse:collapse;\">",
          "<tr style=\"color:#9aa4b1;font-size:11.5px;\">"
          "<td style=\"padding:6px 0;border-bottom:1px solid #eef1f4;\">名称</td>"
+         "<td align=\"right\" style=\"border-bottom:1px solid #eef1f4;\">当时概率</td>"
          "<td align=\"right\" style=\"border-bottom:1px solid #eef1f4;\">推荐价→现价</td>"
          "<td align=\"right\" style=\"border-bottom:1px solid #eef1f4;\">盈亏</td></tr>"]
     for x in lb["rows"]:
         c = "#d93025" if x["盈亏%"] >= 0 else "#1a7f37"
         h.append(f"<tr><td style=\"padding:7px 0;border-bottom:1px solid #f4f6f9;\">{x['名称']}"
                  f"<br><span style=\"font-size:11px;color:#8b949e;\">{x['股数']} 股</span></td>"
+                 f"<td align=\"right\" style=\"border-bottom:1px solid #f4f6f9;color:#1a73e8;\">"
+                 f"{x.get('当时盈利概率', '—')}</td>"
                  f"<td align=\"right\" style=\"border-bottom:1px solid #f4f6f9;\">"
                  f"{x['推荐价']:.2f}→{x['现价']:.2f}</td>"
                  f"<td align=\"right\" style=\"border-bottom:1px solid #f4f6f9;color:{c};\">"
@@ -618,6 +625,7 @@ def _render_html(d: dict) -> str:
             h.append("<tr style=\"color:#9aa4b1;font-size:11.5px;\">"
                      "<td style=\"padding:6px 0;border-bottom:1px solid #eef1f4;\">日期</td>"
                      "<td style=\"border-bottom:1px solid #eef1f4;\">名称</td>"
+                     "<td align=\"right\" style=\"border-bottom:1px solid #eef1f4;\">当时概率</td>"
                      "<td align=\"right\" style=\"border-bottom:1px solid #eef1f4;\">推荐价→现价</td>"
                      "<td align=\"right\" style=\"border-bottom:1px solid #eef1f4;\">结果</td>"
                      "<td align=\"right\" style=\"border-bottom:1px solid #eef1f4;\">盈亏</td></tr>")
@@ -626,6 +634,8 @@ def _render_html(d: dict) -> str:
                 h.append(f"<tr><td style=\"padding:7px 0;border-bottom:1px solid #f4f6f9;\">{x['日期']}</td>"
                          f"<td style=\"border-bottom:1px solid #f4f6f9;\">{x['名称']}"
                          f"<br><span style=\"font-size:11px;color:#8b949e;\">{x['股数']} 股</span></td>"
+                         f"<td align=\"right\" style=\"border-bottom:1px solid #f4f6f9;color:#1a73e8;\">"
+                         f"{x.get('当时盈利概率', '—')}</td>"
                          f"<td align=\"right\" style=\"border-bottom:1px solid #f4f6f9;\">"
                          f"{x['推荐价']:.2f}→{x['现价']:.2f}</td>"
                          f"<td align=\"right\" style=\"border-bottom:1px solid #f4f6f9;\">{x['结果']}</td>"
