@@ -31,6 +31,11 @@ from strategy import (at_limit_down, at_limit_up, backtest, calibrate_win_rate,
                       generate_signals)
 
 import factors  # L1 多因子层：动量/波动率/换手/估值 + 行业中性 + 可配置窗口IC均值配权(默认60日)
+# v1.32: T+1 超短线精筛内嵌（模型已 base64 内嵌，云端零文件路径依赖）
+try:
+    import t1_refine
+except Exception:
+    t1_refine = None
 # 选股引擎统一放在 screen_service（纯 Python，无 Streamlit 依赖）；
 # 这里显式导入，保证 app.xxx 在测试/脚本里沿用原名字
 from screen_service import (CANDIDATES, CANDIDATES_PUSH, HISTORY_DAYS, IC_GATE, MAX_PRICE, MIN_PRICE, ML_WEIGHT,
@@ -363,7 +368,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.31"     # v1.31 新增 dzh_mcp_http.py：用官方 sk-mcp KEY 直连大智慧 MCP 的 HTTP 端点，脚本可自动拉资金流/龙虎榜(替代对话落盘半自动);沿用 v1.30 资金流标注层(不进打分核心未验证)+v1.29 粗筛→精筛+v1.28 全部技术因子粗筛+v1.27 台账+v1.26 复盘净额
+APP_VERSION = "v1.32"     # v1.32 T+1精筛内嵌进「今日选股」按钮：点一次直接出精筛后最终股票(复用候选K线现算8特征→内嵌LightGBM打分重排,模型base64内嵌绕中文路径,样本外+1.56%/期);沿用 v1.31 KEY直连客户端+v1.30 资金流标注层+v1.29 粗筛→精筛+v1.28 全部技术因子粗筛+v1.27 台账+v1.26 复盘净额
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
@@ -699,6 +704,34 @@ if run:
     if len(ranked) == 0:
         st.warning("今天没有股票通过回测+排雷验证。空仓也是一种操作，明天再来。")
         st.stop()
+
+    # ===== v1.32: T+1 超短线精筛，直接决定最终股票顺序 =====
+    # 复用 verify 阶段已取的候选股 K线(res.attrs['hists'])，不额外联网；
+    # 按训练面板口径现算8特征 → 内嵌 LightGBM 打分 → 截面排序。
+    # 模型样本外(2025-07起) top3 次日净超额+1.56%/期、t=7.57、跑赢率68%（技术文档第二十节）。
+    # 失败/无模型时保持原5日口径顺序，选股不中断。
+    _t1_applied = False
+    _t1_basis = ""
+    if t1_refine is not None:
+        try:
+            if t1_refine.available():
+                _hists = ranked.attrs.get("hists") or {}
+                _refined = t1_refine.refine(ranked, _hists)
+                if _refined is not None and len(_refined) > 0:
+                    # 保留 attrs（熔断/IC诊断下游仍要用）
+                    _old_attrs = dict(ranked.attrs)
+                    ranked = _refined
+                    ranked.attrs.update(_old_attrs)
+                    _t1_applied = True
+                    _t1_basis = "T+1 LightGBM（含退市全A样本外+1.56%/期，t=7.57）"
+        except Exception as _e:
+            _t1_basis = f"T+1精筛跳过：{str(_e)[:60]}"
+    if _t1_applied:
+        st.caption(f"🎯 **T+1 精筛已启用**：{' '.join(ranked['代码'].astype(str).str.zfill(6).head(5))} "
+                   f"按次日收益模型重排（{_t1_basis}）。今收买、明收卖，统计优势非必赚。")
+    elif _t1_basis:
+        st.caption(f"ℹ️ T+1精筛未启用（{_t1_basis}），沿用5日口径排序。")
+
     # Stage3 三模型集成精筛诊断（v1.24 接入主流程：LightGBM复用L2 + ExtraTrees + MLP）
     _s3 = ranked.attrs.get("stage3") or {}
     if _s3:
@@ -865,8 +898,17 @@ if run:
                f"一买一卖合计 **{_buy_fee + _sell_fee:.2f} 元**，"
                f"占买入金额 {(_buy_fee + _sell_fee) / _amt * 100:.2f}%（约等于股价要涨这么多才回本）")
 
-    st.success(f"今日选出 {len(plan)} 只，方案如下：")
+    _headline = "🎯 今日 T+1 精筛最终名单" if _t1_applied else "今日选出"
+    st.success(f"{_headline} {len(plan)} 只，方案如下：")
     show = plan.drop(columns=["_win_prob", "_est_win", "_est_loss"])
+    if _t1_applied and "精筛分" in ranked.columns:
+        # 把 T+1 精筛分/排名按代码补进最终方案表（allocate 可能重排，用 map 对齐）
+        _sc = ranked.set_index("代码")["精筛分"].to_dict()
+        _rk = ranked.set_index("代码")["T+1排名"].to_dict()
+        show = show.copy()
+        show["代码"] = show["代码"].astype(str).str.zfill(6)
+        show.insert(0, "T+1排名", show["代码"].map(_rk))
+        show.insert(1, "精筛分", show["代码"].map(_sc).round(4))
     st.dataframe(show, width="stretch", hide_index=True,
                  column_config={"盈利概率": st.column_config.NumberColumn(format="%.0f%%"),
                                 "佣金(元)": st.column_config.NumberColumn(format="%.2f"),
