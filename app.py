@@ -369,7 +369,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.44"     # v1.44 按用户要求产品改名"每日选股"→"老王每日选股"(页面标题+浏览器标签+邮件正文+邮件主题4处);沿用 v1.43 P0修复(漏import numpy致选股恒空)+v1.42 提速四项+v1.41 舆情直连降级放行+v1.40 去持仓体检+v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
+APP_VERSION = "v1.45"     # v1.45 价格带严格生效:去掉CSI成分股价格上限豁免(旧逻辑让100~500元高价股也进池)+下限5→8元+页面显示完整区间8~50;沿用 v1.44 改名老王每日选股+v1.43 P0修复(漏import numpy致选股恒空)+v1.42 提速四项+v1.41 舆情直连降级放行+v1.40 去持仓体检+v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
 
 st.set_page_config(page_title="老王每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
@@ -529,7 +529,7 @@ with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}批）", expanded=F
 # 不再在界面展示台账区。数据仍写入 实盘台账.csv，需要时本地查看即可。
 
 # ---------------- 页面：一个按钮 + 一张结果表 ----------------
-st.caption(f"本金 {capital:.0f} 元 · 只数由本金+预期收益自动优化 · 股价上限 {MAX_PRICE:.1f} 元 · "
+st.caption(f"本金 {capital:.0f} 元 · 只数由本金+预期收益自动优化 · 股价 {MIN_PRICE:.0f}~{MAX_PRICE:.0f} 元（严格过滤） · "
            "已内置手续费（佣金万2.5，单笔最低5元；印花税0.05%卖出收取；含过户费/滑点）")
 
 run = st.button("🔍 今日选股", type="primary", width='stretch')

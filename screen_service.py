@@ -731,12 +731,15 @@ def screen_impl(max_price: float | None = None) -> pd.DataFrame:
     name = df["名称"].astype(str)
     csi = _csi_set()
     board_ok = df["代码"].map(_board_ok) | df["代码"].isin(csi)    # CSI成分股放行创业板/科创板
-    price_ok = df["最新价"].between(MIN_PRICE, max_price) | df["代码"].isin(csi)
+    # v1.45：价格带对所有股票严格生效，CSI成分股不再豁免价格上限。
+    # 旧逻辑 `| df["代码"].isin(csi)` 让沪深300/中证500成分股无视价格上限，
+    # 导致 100~500 元的高价股也进候选池（本地快照实测 230 只>50元、65只>100元），与"8~50元"设定矛盾。
+    price_ok = df["最新价"].between(MIN_PRICE, max_price)
     mask = (
         board_ok
         & ~df["代码"].isin(lhb)                           # 剔除近一月上过龙虎榜的游资爆炒股
         & ~name.str.contains("ST|退", na=False)          # 剔除ST/退市股
-        & price_ok                                       # CSI成分股允许突破MAX_PRICE上限
+        & price_ok                                       # 价格严格限制在[下限,上限]，无指数成分豁免
         & (df["成交额"] > 5e7)                            # 日成交额>5000万，保证能顺利卖出
         & df["市盈率-动态"].between(0, 80)                # 剔除亏损股和泡沫股
         & df["总市值"].between(3e9, 2e11)                 # 30亿~2000亿，避开微盘操纵股和超级大盘股
