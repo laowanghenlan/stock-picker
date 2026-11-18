@@ -363,7 +363,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.28"     # v1.28 定位改为宽候选池粗筛+对照：全部技术因子用上(IC门槛/相关性/因子数门槛放宽)+网页导出候选池CSV供外部精筛；沿用 v1.27 台账回填 + v1.26 复盘净额口径
+APP_VERSION = "v1.29"     # v1.29 打通粗筛→精筛链路：导出候选池补当日快照字段(开盘/隔夜/换手/量比/市值/估值,修价格列bug)+新增 refine_pool.py T+1 LightGBM精筛器(含退市全A样本外+1.56%/期t7.57);沿用 v1.28 全部技术因子粗筛 + v1.27 台账回填 + v1.26 复盘净额
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
@@ -875,14 +875,18 @@ if run:
     st.caption("预计盈利/亏损 = 投入 × 该股历史平均每笔盈利率/亏损率（已扣交易成本）；"
                "盈利概率 = 回测胜率经贝叶斯收缩后的校准值（样本少时向50%收敛）。均为历史统计推算，不代表未来，不构成投资建议。")
 
-    # ---- v1.28 粗筛候选池导出：把通过回测+排雷的全部候选(含所有技术因子值)导出，供外部模型精筛 ----
+    # ---- 粗筛候选池导出：全部候选(含技术因子值 + v1.29当日快照字段)导出，供 refine_pool.py 精筛 ----
     with st.expander("📦 导出粗筛候选池（给外部模型精筛用）", expanded=False):
         st.caption(f"本 web 定位=**宽候选池粗筛 + 对照基准**，不是精确预测。这里导出通过回测+排雷的 "
                    f"**{len(ranked)} 只候选**及全部技术因子值，你可拿去外部更专业的模型做二次精筛。"
-                   "已纳入当前数据能算出的全部技术因子（动量/反转/波动/MACD/KDJ + P1候选）；"
-                   "换手率/估值/财报因子因免费行情无历史数据，不可用。")
-        # 挑出代码/名称/价格/评分 + 所有因子原始列 + 因子贡献列 + ML分
-        _exp_cols = ["代码", "名称", "现价", "总分", "行业", "扣费总收益", "胜率", "ML分"]
+                   "已纳入当前数据能算出的全部技术因子（动量/反转/波动/MACD/KDJ + P1候选），"
+                   "并带上当日快照字段（今开/昨收/隔夜涨跌/振幅/换手率/量比/成交额/市值/PE/PB）供 T+1 精筛。"
+                   "注意：快照字段只有当日截面、无历史序列，不能做IC回测，仅供外部模型当前截面打分。")
+        # 挑出代码/名称/价格/评分 + v1.29当日快照字段(超短线精筛关键) + 所有因子原始列 + 因子贡献列 + ML分
+        # ranked 来自 verify_impl，价格列名为"最新价"（best_plan 才叫"现价"）；两者都兼容。
+        _exp_cols = ["代码", "名称", "最新价", "现价", "总分", "行业", "扣费总收益", "胜率", "ML分",
+                     "今日涨跌", "今开", "昨收", "最高", "最低", "振幅", "换手率", "量比",
+                     "成交额", "成交量", "市盈率", "市净率", "总市值", "流通市值", "隔夜涨跌%"]
         _factor_raw = [f for f in factors.ALL_FACTOR_COLS if f in ranked.columns]
         _factor_contrib = [c for c in ranked.columns if c.startswith("因子_") and c.endswith("_贡献")]
         _export = ranked.reindex(columns=list(dict.fromkeys(

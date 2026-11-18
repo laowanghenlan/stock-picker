@@ -874,9 +874,26 @@ def verify_impl(cands: pd.DataFrame, progress,
             # 技术面硬条件：当前价在20日线上，且5日线在20日线上（趋势仍向上）
             # _fast/_slow 是信号表里的 MA5/MA20 列
             trend_ok = bool(last["收盘"] > last["_slow"] and last["_fast"] > last["_slow"])
+            # v1.29 当日快照字段：T+1 超短线精筛最需要的开盘/隔夜/换手/量能/市值/估值。
+            # 这些在 spot 快照里有，但旧版组装结果时丢弃了，外部精筛模型拿不到；用 r.get 防空。
+            def _snap(key):
+                try:
+                    v = r.get(key, np.nan)
+                    return float(v) if v is not None and v == v else np.nan
+                except Exception:
+                    return np.nan
             rows.append({
                 "代码": code, "名称": r["名称"], "最新价": float(r["最新价"]),
                 "今日涨跌": float(r["涨跌幅"]), "量比": float(r["量比"]),
+                # v1.29 快照字段（供导出给外部 T+1 精筛）
+                "今开": _snap("今开"), "昨收": _snap("昨收"),
+                "最高": _snap("最高"), "最低": _snap("最低"),
+                "振幅": _snap("振幅"), "换手率": _snap("换手率"),
+                "成交额": _snap("成交额"), "成交量": _snap("成交量"),
+                "市盈率": _snap("市盈率-动态"), "市净率": _snap("市净率"),
+                "总市值": _snap("总市值"), "流通市值": _snap("流通市值"),
+                "隔夜涨跌%": (round((_snap("今开") / _snap("昨收") - 1) * 100, 2)
+                            if _snap("昨收") > 0 else np.nan),
                 "扣费总收益": float(bs["总收益率"].rstrip("%")),
                 "胜率": float(bs["胜率"].rstrip("%")),
                 "最大回撤": float(bs["最大回撤"].rstrip("%")),
