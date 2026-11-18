@@ -406,7 +406,7 @@ def _dzh_fundflow_contrast(codes, key):
         return None, f"{type(e).__name__}: {str(e)[:120]}"
 
 
-APP_VERSION = "v1.34"     # v1.34 资金流对照内嵌今日选股按钮(KEY会话内输入/云端Secrets,不落盘不入仓,仅对照不进打分)+沿用 v1.33 KEY直连实测+v1.32 T+1精筛内嵌+v1.31 KEY客户端+v1.30 标注层+v1.29 粗筛→精筛+v1.28 全因子+v1.27 台账+v1.26 复盘净额
+APP_VERSION = "v1.35"     # v1.35 修云端KEY隐患(空输入自动回退Secrets,不覆盖云端KEY)+加"已检测到云端KEY"可见状态(显示尾号供核对);沿用 v1.34 资金流对照内嵌今日选股+v1.33 KEY直连实测+v1.32 T+1精筛内嵌+v1.31 KEY客户端+v1.30 标注层+v1.29 粗筛→精筛+v1.28 全因子+v1.27 台账+v1.26 复盘净额
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
@@ -621,11 +621,17 @@ with st.expander("💰 大智慧资金流对照（选填 · 主力资金/龙虎�
                "点「今日选股」即可在结果里一并看到每只票的主力净流入/特大单/龙虎榜对照。"
                "KEY 只在本页面会话内使用，**不落盘、不进代码仓库**；也可由部署者在云端 Secrets 配 `DZH_MCP_KEY` 一劳永逸。"
                "资金流为当日截面、无历史验证，仅人工对照，不构成投资建议。")
-    _dzh_default = _dzh_secret_key()
-    _dzh_input = st.text_input("大智慧 KEY（sk_dzh_ 开头；留空则跳过资金流对照）",
-                               value=_dzh_default, type="password", key="_dzh_key_box",
-                               placeholder="sk_dzh_...  留空=不看资金流")
-    st.session_state["_dzh_key"] = (_dzh_input or "").strip()
+    _dzh_secret = _dzh_secret_key()
+    if _dzh_secret:
+        st.success("✅ 已检测到云端 KEY（Secrets `DZH_MCP_KEY`）：点「今日选股」会自动带出资金流对照，无需在下方填写。"
+                   f"（KEY 尾号 …{_dzh_secret[-4:]}，仅显示尾号用于核对）")
+    else:
+        st.info("ℹ️ 未检测到云端 KEY。可在下方粘贴使用本次会话；或到 Streamlit 后台 Secrets 配 `DZH_MCP_KEY` 一劳永逸。留空则跳过资金流对照，不影响选股。")
+    _dzh_input = st.text_input("大智慧 KEY（sk_dzh_ 开头；留空=用云端KEY或跳过）",
+                               type="password", key="_dzh_key_box",
+                               placeholder="sk_dzh_...  留空=用云端KEY")
+    # 空输入自动回退到云端 KEY，避免手滑清空把云端 KEY 覆盖掉（v1.35 修隐患）
+    st.session_state["_dzh_key"] = (_dzh_input or "").strip() or _dzh_secret
 
 run = st.button("🔍 今日选股", type="primary", width='stretch')
 
