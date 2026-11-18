@@ -383,7 +383,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.51.2"   # v1.51.2 P0修复:c4.metric缺value参数(只传label+help,metric要求label+value)抛TypeError白屏——v1.50引入被v1.51 ImportError挡在前面,止血后暴露;改为metric("本次 / 成本最优","N只 / M只")。AST全扫35处metric参数完整。前版 v1.51.1 P0止血:减持标签改软导入try/except,防增量部署中间态(云端screen_service旧版无此函数)抛ImportError拖垮整页白屏;函数缺失时标签显示—。前版 v1.51 结果表加"股东减持"标签(纯展示):按入选股代码查东财RPT_SHARE_HOLDER_INCREASE近90天减持,用正确字段AFTER_CHANGE_RATE(非报价涨跌幅CHANGE_RATE)聚合累计减持占股本%+笔数,显示"减持X.XX%·N笔"/"—";失败降级—不影响选股。缓存1h。顺带修复screen_service漏import re(_em_news_direct用re.sub却从未导入→NameError被吞→舆情排雷一直静默失效,补import re后恢复)。纯展示不改选股/打分/排序/排雷。前版 v1.50 把成本计算器集成进选股结果区(用户要求"点今日选股后在股票只数这加进去"):删除v1.49独立折叠面板,改为在"今日选出N只"前用本次真实plan逐笔算——4个metric(往返费用/回本涨幅门槛含双边滑点/费用占买入/本次只数vs成本最优只数)+触底佣金告警+「不同只数成本对比」折叠表(按本次均价试算供对照不改方案);卖出费用逐笔按max(5,amt×0.00025)+印花税+过户费算(大额单只更准);纯展示不改选股/打分/精筛/风控。沿用 v1.49 新增「T+1交易成本计算器」折叠面板:输入本金/股价/只数,实时算往返总费用(佣金万2.5最低5元+印花税0.05%卖出+过户费0.001%双向)、回本涨幅门槛(含双边滑点0.1%)、费用占比、成本视角最优只数(单笔≥2万避开5元佣金封底)、多只数对比表;纯本地计算screen_service.cost_calculator无副作用,口径与allocate/best_plan一致,不改选股/打分/精筛/风控。沿用 v1.48 P0修复线上KeyError:REVIEW_CACHE_KEY v1.22→v1.48强制st.cache_data旧复盘缓存失效(旧缓存无「当时盈利概率」列,g[_cols]报错整页白屏)+app展示前兜底缺列补—;沿用 v1.47 邮件历史表现也显示盈利概率:复盘明细/上一次推送卡片的文本版+HTML版四段渲染都补上「当时概率」列(v1.46只加了数据字段没接渲染层,邮件看不到);沿用 v1.46 历史复盘加「当时盈利概率」列:推送留档存下当时的校准盈利概率(web端app.py+邮件端daily_push.py两条路径)+复盘表与盈亏%并排对照,旧批次无留档显示—不编造;沿用 v1.45 价格带严格生效:去掉CSI成分股价格上限豁免(旧逻辑让100~500元高价股也进池)+下限5→8元+页面显示完整区间8~50;沿用 v1.44 改名老王每日选股+v1.43 P0修复(漏import numpy致选股恒空)+v1.42 提速四项+v1.41 舆情直连降级放行+v1.40 去持仓体检+v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
+APP_VERSION = "v1.52"     # v1.52 减持标签分层标注:累计比例仍按近90天算,最新一笔公告在近30天内则标🔴新减持、否则普通"减持X%";复用reduce_label_impl已返回的last_date加30天cutoff判定,纯展示不改选股/打分/排序/排雷。前版 v1.51.2 P0修复:c4.metric缺value参数(只传label+help,metric要求label+value)抛TypeError白屏——v1.50引入被v1.51 ImportError挡在前面,止血后暴露;改为metric("本次 / 成本最优","N只 / M只")。AST全扫35处metric参数完整。前版 v1.51.1 P0止血:减持标签改软导入try/except,防增量部署中间态(云端screen_service旧版无此函数)抛ImportError拖垮整页白屏;函数缺失时标签显示—。前版 v1.51 结果表加"股东减持"标签(纯展示):按入选股代码查东财RPT_SHARE_HOLDER_INCREASE近90天减持,用正确字段AFTER_CHANGE_RATE(非报价涨跌幅CHANGE_RATE)聚合累计减持占股本%+笔数,显示"减持X.XX%·N笔"/"—";失败降级—不影响选股。缓存1h。顺带修复screen_service漏import re(_em_news_direct用re.sub却从未导入→NameError被吞→舆情排雷一直静默失效,补import re后恢复)。纯展示不改选股/打分/排序/排雷。前版 v1.50 把成本计算器集成进选股结果区(用户要求"点今日选股后在股票只数这加进去"):删除v1.49独立折叠面板,改为在"今日选出N只"前用本次真实plan逐笔算——4个metric(往返费用/回本涨幅门槛含双边滑点/费用占买入/本次只数vs成本最优只数)+触底佣金告警+「不同只数成本对比」折叠表(按本次均价试算供对照不改方案);卖出费用逐笔按max(5,amt×0.00025)+印花税+过户费算(大额单只更准);纯展示不改选股/打分/精筛/风控。沿用 v1.49 新增「T+1交易成本计算器」折叠面板:输入本金/股价/只数,实时算往返总费用(佣金万2.5最低5元+印花税0.05%卖出+过户费0.001%双向)、回本涨幅门槛(含双边滑点0.1%)、费用占比、成本视角最优只数(单笔≥2万避开5元佣金封底)、多只数对比表;纯本地计算screen_service.cost_calculator无副作用,口径与allocate/best_plan一致,不改选股/打分/精筛/风控。沿用 v1.48 P0修复线上KeyError:REVIEW_CACHE_KEY v1.22→v1.48强制st.cache_data旧复盘缓存失效(旧缓存无「当时盈利概率」列,g[_cols]报错整页白屏)+app展示前兜底缺列补—;沿用 v1.47 邮件历史表现也显示盈利概率:复盘明细/上一次推送卡片的文本版+HTML版四段渲染都补上「当时概率」列(v1.46只加了数据字段没接渲染层,邮件看不到);沿用 v1.46 历史复盘加「当时盈利概率」列:推送留档存下当时的校准盈利概率(web端app.py+邮件端daily_push.py两条路径)+复盘表与盈亏%并排对照,旧批次无留档显示—不编造;沿用 v1.45 价格带严格生效:去掉CSI成分股价格上限豁免(旧逻辑让100~500元高价股也进池)+下限5→8元+页面显示完整区间8~50;沿用 v1.44 改名老王每日选股+v1.43 P0修复(漏import numpy致选股恒空)+v1.42 提速四项+v1.41 舆情直连降级放行+v1.40 去持仓体检+v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
 
 st.set_page_config(page_title="老王每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
@@ -931,11 +931,17 @@ if run:
         _reduce = reduce_labels(_show_codes)
     except Exception:
         _reduce = {}
+    # v1.52 分层标注：累计比例仍按近90天算，但最新一笔公告在近30天内 → 标🔴新减持
+    _new_cutoff = (dt.date.today() - dt.timedelta(days=30)).isoformat()
     def _reduce_tag(c):
         d = _reduce.get(str(c).zfill(6))
         if not d or d.get("n", 0) == 0:
             return "—"
-        return f"减持{d['ratio']:.2f}%·{d['n']}笔"
+        tag = f"减持{d['ratio']:.2f}%·{d['n']}笔"
+        # last_date 为 "YYYY-MM-DD"，字典序即时间序；空串"" < cutoff 不会误标
+        if str(d.get("last_date", ""))[:10] >= _new_cutoff:
+            return f"🔴新减持 {tag}"
+        return tag
     show = show.copy()
     show.insert(len(show.columns), "股东减持", [_reduce_tag(c) for c in _show_codes])
     st.dataframe(show, width="stretch", hide_index=True,
@@ -943,7 +949,8 @@ if run:
                                 "佣金(元)": st.column_config.NumberColumn(format="%.2f"),
                                 "预计盈利(元)": st.column_config.NumberColumn(format="%+.1f"),
                                 "预计亏损(元)": st.column_config.NumberColumn(format="%.1f")})
-    st.caption("股东减持标签＝近90天该股东减持公告累计占股本比例及笔数（破折号表示近90天无减持公告或数据未取到），"
+    st.caption("股东减持标签＝近90天该股减持公告累计占股本比例及笔数；🔴新减持＝最新一笔公告在近30天内"
+               "（累计比例仍按90天算，破折号表示近90天无减持公告或数据未取到），"
                "仅供信息参考、不参与选股与排序；预计盈利/亏损 = 投入 × 该股历史平均每笔盈利率/亏损率（已扣交易成本）；"
                "盈利概率 = 回测胜率经贝叶斯收缩后的校准值（样本少时向50%收敛）。均为历史统计推算，不代表未来，不构成投资建议。")
 
