@@ -62,7 +62,7 @@ IC_GATE = app.IC_GATE                                 # 训练期组合IC低于�
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.45"
+APP_VERSION = "v1.46"
 
 
 FONT = "-apple-system,'PingFang SC','Microsoft YaHei',Arial,sans-serif"
@@ -151,6 +151,7 @@ def build_review(rv: pd.DataFrame) -> dict | None:
             "股数": int(float(r2.get("股数", 0) or 0)),
             "结果": r2["结果"], "盈亏%": float(r2["盈亏%"]),
             "盈亏额": float(r2["_盈亏额"]),
+            "当时盈利概率": str(r2.get("当时盈利概率", "—")),
         })
     try:
         r["conclusion"] = app.review_conclusion(rv)
@@ -284,7 +285,12 @@ def _collect(precomputed=None, archive: bool = True) -> dict:
         print("复盘摘要生成失败(不影响推荐):", e)
 
     # 留档供周末复盘（带上推送时间，同一天多次推送才能在 web 里分开显示）
-    rec = plan[["代码", "名称", "现价", "买入股数"]].copy()
+    _rec_cols = ["代码", "名称", "现价", "买入股数"]
+    if "盈利概率" in plan.columns:                          # v1.46 留档当时的校准盈利概率，供复盘对照实际输赢
+        _rec_cols.append("盈利概率")
+    rec = plan[_rec_cols].copy()
+    if "盈利概率" not in rec.columns:                       # 兼容异常路径：保证列存在，旧值留空
+        rec["盈利概率"] = float("nan")
     rec.insert(0, "日期", date_str)
     ptime = _now_hm()
     rec.insert(1, "推送时间", ptime)

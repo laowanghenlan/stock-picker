@@ -625,6 +625,9 @@ def review_impl(_key: str = "") -> pd.DataFrame:
                "结果": label,
                "同期沪深300%": bench,
                "盈亏额": net_pnl,
+               # v1.46 当时的盈利概率：推荐时留档的校准值；旧批次无此列显示"—"，无法回溯，不编造
+               "当时盈利概率": ("—" if pd.isna(r.get("盈利概率")) or r.get("盈利概率") is None
+                             else f"{float(r.get('盈利概率')):.0f}%"),
                "_盈亏额": net_pnl,
                "_done": not label.startswith("⏳"), "_saved": 0.0}
         # 止损挽回金额：若止损后继续跌到满期，估算纪律避免了多少额外亏损（净额口径）

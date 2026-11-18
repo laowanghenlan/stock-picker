@@ -173,7 +173,12 @@ def send_email_with_results(plan, mined, capital, leftover, cold, idx_close, idx
         daily_push.send(daily_push._render_text(d), daily_push._render_html(d))
         # SMTP 成功后才留档，避免发送失败留下并未推送的推荐记录。
         try:
-            rec = plan[["代码", "名称", "现价", "买入股数"]].copy()
+            _rec_cols = ["代码", "名称", "现价", "买入股数"]
+            if "盈利概率" in plan.columns:                  # v1.46 留档当时的校准盈利概率，供复盘对照实际输赢
+                _rec_cols.append("盈利概率")
+            rec = plan[_rec_cols].copy()
+            if "盈利概率" not in rec.columns:               # 兼容异常路径：保证列存在，旧值留空
+                rec["盈利概率"] = float("nan")
             rec.insert(0, "日期", d["date"])
             rec.insert(1, "推送时间", daily_push._now_hm())   # 同一天多次推送靠它分批
             rec["大盘标签"] = d["tag"]
@@ -369,7 +374,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.45"     # v1.45 价格带严格生效:去掉CSI成分股价格上限豁免(旧逻辑让100~500元高价股也进池)+下限5→8元+页面显示完整区间8~50;沿用 v1.44 改名老王每日选股+v1.43 P0修复(漏import numpy致选股恒空)+v1.42 提速四项+v1.41 舆情直连降级放行+v1.40 去持仓体检+v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
+APP_VERSION = "v1.46"     # v1.46 历史复盘加「当时盈利概率」列:推送留档存下当时的校准盈利概率(web端app.py+邮件端daily_push.py两条路径)+复盘表与盈亏%并排对照,旧批次无留档显示—不编造;沿用 v1.45 价格带严格生效:去掉CSI成分股价格上限豁免(旧逻辑让100~500元高价股也进池)+下限5→8元+页面显示完整区间8~50;沿用 v1.44 改名老王每日选股+v1.43 P0修复(漏import numpy致选股恒空)+v1.42 提速四项+v1.41 舆情直连降级放行+v1.40 去持仓体检+v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
 
 st.set_page_config(page_title="老王每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
@@ -498,7 +503,7 @@ with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}批）", expanded=F
             st.caption(f"持有中 {len(holding)} 只，浮动盈亏 {holding['盈亏额'].sum():+.0f} 元"
                        f"（未计入胜率与累计盈亏）；平均每批推荐 "
                        f"{len(rv) / max(1, rv['_batch'].nunique()):.1f} 只")
-            _cols = ["名称", "推荐价", "现价", "股数", "费用(元)", "涨跌%", "盈亏%", "盈亏额", "同期沪深300%", "结果"]
+            _cols = ["名称", "推荐价", "现价", "股数", "费用(元)", "涨跌%", "当时盈利概率", "盈亏%", "盈亏额", "同期沪深300%", "结果"]
             _col_fmt = {"费用(元)": st.column_config.NumberColumn(format="%.1f 元"),
                         "涨跌%": st.column_config.NumberColumn(format="%+.2f%%"),
                         "盈亏%": st.column_config.NumberColumn(format="%+.2f%%"),
@@ -523,6 +528,9 @@ with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}批）", expanded=F
             st.caption("💰 盈亏额=卖出到手−买入成本，已扣佣金(单笔最低5元)、印花税、过户费"
                        "（每笔约10元固定成本）；费用列可核对。涨跌%是纯价格涨跌，盈亏%是扣费后的净收益率，"
                        "胜率按盈亏额正负统计——小额盈利扣费后转亏的，不计为胜。")
+            st.caption("🎯 当时盈利概率=推荐当天按回测胜率做贝叶斯收缩后的校准值，和盈亏%并排看："
+                       "说60%盈利的那批，实际赚了还是亏了，一眼能看出概率准不准。"
+                       "该字段从 v1.46 起才留档，早期批次显示「—」且无法补算（不编造历史）。")
 
 # ---------------- 实盘 OOS 台账：后台照常记录与自动回填（v1.37 按用户要求从页面隐藏，数据不删） ----------------
 # 记录/回填逻辑在上方 _handle_scheduled_action 与页面初始化处（oos_ledger.record/update_due），
