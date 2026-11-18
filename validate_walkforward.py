@@ -230,7 +230,7 @@ def _load_universe(max_stocks: int, refresh: bool, pool: str = "lowprice",
         tag = f"沪深300+中证500（{len(csi)}只）"
     else:
         capital, n_picks = 2200.0, 2
-        min_price = 10.0
+        min_price = 5.0
         max_price = 50.0
         # CSI 成分股 override：允许过板块和价格上限
         board_ok = (spot["代码"].map(_board_ok) | spot["代码"].isin(csi)).fillna(False).astype(bool)
