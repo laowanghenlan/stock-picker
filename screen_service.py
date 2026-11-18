@@ -545,21 +545,54 @@ def review_impl(_key: str = "") -> pd.DataFrame:
                 bench = round((b1 / b0 - 1) * 100, 2)
             except Exception:
                 bench = None
+        # ===== 盈亏额按真实到手净额计算（v1.26 修正）=====
+        # 买入成本 = 成交金额 + 佣金(max5) + 过户费；卖出到手 = 成交金额 - 佣金(max5) - 印花税 - 过户费
+        # 与页面宣称的"已内置手续费"及选股计划的 allocate 口径一致。
+        # 之前用 (判定价-推荐价)*股数 的毛额，低估了每笔约10元固定成本，
+        # 会把大量小额盈利误显示为盈利（如+10元实际扣费后为-0.5元），连带胜率虚高。
+        buy_amt = base_px * shares
+        sell_amt = judge_px * shares
+        buy_fee = max(5.0, buy_amt * 0.00025) + buy_amt * 0.00001   # 佣金(最低5元)+过户费
+        invest0 = buy_amt + buy_fee
+        is_holding = label.startswith("⏳")   # 未满20日、未触发：还没卖出，不计卖出费
+        if n == 0:
+            # 当日新推：无后续行情，盈亏按0显示（买入尚未产生卖出）
+            sell_fee = 0.0
+            total_fee = 0.0
+            net_pnl = 0.0
+        elif is_holding:
+            # 浮动盈亏：仅按当前市值算浮盈，不扣卖出端费用（未发生卖出）；买入佣金已计入成本
+            sell_fee = 0.0
+            total_fee = round(buy_fee, 1)
+            net_pnl = round(sell_amt - invest0, 1)    # 浮动：现市值 - 买入总成本
+        else:
+            sell_fee = max(5.0, sell_amt * 0.00025) + sell_amt * 0.0005 + sell_amt * 0.00001  # 佣金+印花税+过户费
+            total_fee = round(buy_fee + sell_fee, 1)
+            net_pnl = round(sell_amt - sell_fee - invest0, 1)   # 实际到手净盈亏额
+        # 净收益率 = 净额 / 初始投入（含买入费），与"盈亏额"自洽，避免金额与百分比对不上
+        net_pct = round(net_pnl / invest0 * 100, 2) if invest0 > 0 else 0.0
         row = {"日期": rec_date.strftime("%Y-%m-%d"),
                "推送时间": ("" if pd.isna(r.get("推送时间")) else str(r.get("推送时间")).strip()),
                "代码": code,
                "名称": str(r.get("名称", "")).strip(),
                "推荐价": round(price0, 2), "现价": round(judge_px, 2),
                "股数": shares,
-               "盈亏%": round((judge_px / base_px - 1) * 100, 2), "结果": label,
+               "费用(元)": total_fee,
+               "涨跌%": round((judge_px / base_px - 1) * 100, 2),   # 纯价格涨跌幅（对止盈止损线）
+               "盈亏%": net_pct,                                     # 净收益率（对实际到手金额）
+               "结果": label,
                "同期沪深300%": bench,
-               "盈亏额": round((judge_px - base_px) * shares, 1),
-               "_盈亏额": round((judge_px - base_px) * shares, 1),
+               "盈亏额": net_pnl,
+               "_盈亏额": net_pnl,
                "_done": not label.startswith("⏳"), "_saved": 0.0}
-        # 止损挽回金额：若止损后继续跌到满期，估算纪律避免了多少额外亏损
+        # 止损挽回金额：若止损后继续跌到满期，估算纪律避免了多少额外亏损（净额口径）
         if label == "🛑止损保命" and len(future) >= REVIEW_DAYS:
             day_end = float(future.iloc[REVIEW_DAYS - 1])
-            row["_saved"] = round(max(0.0, judge_px - day_end) * shares, 1)
+            end_amt = day_end * shares
+            end_fee = max(5.0, end_amt * 0.00025) + end_amt * 0.0005 + end_amt * 0.00001
+            end_net = end_amt - end_fee
+            stop_net = sell_amt - sell_fee        # 止损当笔实际到手（上方已算）
+            row["_saved"] = round(max(0.0, stop_net - end_net), 1)
         rows.append(row)
     if not rows:
         return pd.DataFrame()
@@ -574,7 +607,8 @@ def review_conclusion(rv: pd.DataFrame) -> str:
     done = rv[rv["_done"]]
     if len(done) == 0:
         return "推荐都还在20日持有期内，暂无胜负结果，耐心等复盘。"
-    wins = int(done["结果"].isin(["🎯止盈", "🏁到期盈利"]).sum())
+    # 胜率按"实际到手净额>0"判定（v1.26）：标签盈利但扣费后亏损的笔不算赢，口径与盈亏金额一致
+    wins = int((done["_盈亏额"] > 0).sum())
     wr = wins / len(done) * 100
     avg = done["盈亏%"].mean()
     if wr >= 60 and avg > 0:

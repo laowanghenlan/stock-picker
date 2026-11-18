@@ -343,7 +343,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.25"     # v1.25 因子研究增强：IC窗口20→60降噪 + 市值中性化/单调性检验/候选因子(配置可开启)
+APP_VERSION = "v1.26"     # v1.26 修正复盘盈亏额：扣除真实手续费(佣金最低5元/印花税/过户费)，盈亏%改净收益率，胜率按净额判
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
@@ -461,7 +461,7 @@ with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}批）", expanded=F
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("推荐总数", f"{len(rv)} 条 / {rv['_batch'].nunique()} 批")
             if len(done) > 0:
-                wins = int(done["结果"].isin(["🎯止盈", "🏁到期盈利"]).sum())
+                wins = int((done["_盈亏额"] > 0).sum())   # 按实际到手净额判胜（扣费后）
                 m2.metric("胜率", f"{wins / len(done) * 100:.0f}%（{wins}/{len(done)}）")
                 m3.metric("平均每笔盈亏", f"{done['盈亏%'].mean():+.2f}%")
                 m4.metric("累计盈亏", f"{done['_盈亏额'].sum():+.0f} 元")
@@ -479,8 +479,10 @@ with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}批）", expanded=F
             st.caption(f"持有中 {len(holding)} 只，浮动盈亏 {holding['盈亏额'].sum():+.0f} 元"
                        f"（未计入胜率与累计盈亏）；平均每批推荐 "
                        f"{len(rv) / max(1, rv['_batch'].nunique()):.1f} 只")
-            _cols = ["名称", "推荐价", "现价", "股数", "盈亏%", "盈亏额", "同期沪深300%", "结果"]
-            _col_fmt = {"盈亏%": st.column_config.NumberColumn(format="%+.2f%%"),
+            _cols = ["名称", "推荐价", "现价", "股数", "费用(元)", "涨跌%", "盈亏%", "盈亏额", "同期沪深300%", "结果"]
+            _col_fmt = {"费用(元)": st.column_config.NumberColumn(format="%.1f 元"),
+                        "涨跌%": st.column_config.NumberColumn(format="%+.2f%%"),
+                        "盈亏%": st.column_config.NumberColumn(format="%+.2f%%"),
                         "盈亏额": st.column_config.NumberColumn(format="%+.0f 元"),
                         "同期沪深300%": st.column_config.NumberColumn(format="%+.2f%%")}
             # 按推送批次（日期+时间）分组显示，批次之间用红色横线隔开
@@ -497,8 +499,11 @@ with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}批）", expanded=F
                 st.caption(f"⚠️ 已出结果仅 {len(done)} 笔（<30），统计意义不足，结论别太当真；"
                            "攒到30~60笔后再看胜率才有参考价值。")
             st.caption("判定规则：推荐日后最长跟踪20个交易日，收盘涨超+10%为🎯止盈、跌破-5%为🛑止损；"
-                       "满20日未触发按到期收盘定盈亏（🏁）；现价为止盈/止损触发价或最新收盘；"
+                       "满20日未触发按到期收盘定盈亏（🏁）；现价为触发当日/最新收盘价；"
                        "未满20日且未触发的标 ⏳持有中，不计入胜率。")
+            st.caption("💰 盈亏额=卖出到手−买入成本，已扣佣金(单笔最低5元)、印花税、过户费"
+                       "（每笔约10元固定成本）；费用列可核对。涨跌%是纯价格涨跌，盈亏%是扣费后的净收益率，"
+                       "胜率按盈亏额正负统计——小额盈利扣费后转亏的，不计为胜。")
 
 # ---------------- 页面：一个按钮 + 一张结果表 ----------------
 st.caption(f"本金 {capital:.0f} 元 · 只数由本金+预期收益自动优化 · 股价上限 {MAX_PRICE:.1f} 元 · "

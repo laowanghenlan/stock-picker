@@ -62,7 +62,7 @@ IC_GATE = app.IC_GATE                                 # 训练期组合IC低于�
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.25"
+APP_VERSION = "v1.26"
 
 
 FONT = "-apple-system,'PingFang SC','Microsoft YaHei',Arial,sans-serif"
@@ -121,7 +121,7 @@ def build_review(rv: pd.DataFrame) -> dict | None:
     done = rv[rv["_done"]]                   # 只统计已出结果的（止盈/止损/到期）
     if len(done) == 0:
         return None
-    wins = int(done["结果"].isin(["🎯止盈", "🏁到期盈利"]).sum())
+    wins = int((done["_盈亏额"] > 0).sum())   # 按实际到手净额判胜（扣费后），与win_n口径一致
     _win, _loss = done[done["_盈亏额"] > 0], done[done["_盈亏额"] < 0]
     _hold = rv[~rv["_done"]]
     _nb = int(rv["_batch"].nunique()) if "_batch" in rv.columns else 0

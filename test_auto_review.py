@@ -100,19 +100,23 @@ def scenario_b():
     pd.DataFrame(rows).to_csv(CSV, index=False, encoding="utf-8-sig")
     at = run_app()
 
-    # 与 app.py 完全相同的口径手工重算期望值
-    pnls = [round((9.40 / 10.00 - 1) * 100, 2), round((5.56 / 5.00 - 1) * 100, 2),
-            round((4.20 / 4.00 - 1) * 100, 2), round((7.80 / 8.00 - 1) * 100, 2)]
-    amounts = [round((9.40 - 10.00) * 100, 1), round((5.56 - 5.00) * 200, 1),
-               round((4.20 - 4.00) * 100, 1), round((7.80 - 8.00) * 100, 1)]
+    # 与 app.py 完全相同的口径手工重算期望值（v1.26：盈亏额=卖出到手-买入成本，已扣手续费）
+    def _net(bp, jp, sh):
+        ba = bp * sh; bf = max(5.0, ba * 0.00025) + ba * 0.00001
+        sa = jp * sh; sf = max(5.0, sa * 0.00025) + sa * 0.0005 + sa * 0.00001
+        invest0 = ba + bf
+        return round(sa - sf - invest0, 1), round((sa - sf - invest0) / invest0 * 100, 2)
+    _trades = [(10.00, 9.40, 100), (5.00, 5.56, 200), (4.00, 4.20, 100), (8.00, 7.80, 100)]
+    amounts = [_net(bp, jp, sh)[0] for bp, jp, sh in _trades]
+    pnls = [_net(bp, jp, sh)[1] for bp, jp, sh in _trades]   # 净收益率（盈亏%现在是净额口径）
     assert metric(at, "推荐总数") == "5 条 / 3 批"
     assert metric(at, "胜率") == "50%（2/4）", metric(at, "胜率")
     assert metric(at, "平均每笔盈亏") == f"{sum(pnls) / len(pnls):+.2f}%"
     assert metric(at, "累计盈亏") == f"{sum(amounts):+.0f} 元"
     assert metric(at, "盈利笔数") == "2 笔"
-    assert metric(at, "盈利金额") == "+132 元"
+    assert metric(at, "盈利金额") == "+111 元"
     assert metric(at, "亏损笔数") == "2 笔"
-    assert metric(at, "亏损金额") == "-80 元"
+    assert metric(at, "亏损金额") == "-101 元"
 
     tbl = review_table(at)
     assert len(tbl) == 5
