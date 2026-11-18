@@ -369,12 +369,12 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.43"     # v1.43 P0修复:screen_service漏import numpy导致_snap的np.nan抛NameError被except吞,全候选剔除res恒空→"候选股均未通过验证";补import numpy+verify_errors记录+错误文案透出;沿用 v1.42 提速四项+v1.41 舆情直连降级放行+v1.40 去持仓体检+v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
+APP_VERSION = "v1.44"     # v1.44 按用户要求产品改名"每日选股"→"老王每日选股"(页面标题+浏览器标签+邮件正文+邮件主题4处);沿用 v1.43 P0修复(漏import numpy致选股恒空)+v1.42 提速四项+v1.41 舆情直连降级放行+v1.40 去持仓体检+v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
 
-st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
+st.set_page_config(page_title="老王每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
     st.stop()
-st.title("📈 每日选股")
+st.title("📈 老王每日选股")
 st.markdown(f"**当前版本：{APP_VERSION}**")
 
 # ---------------- 大盘温度横幅（低温期提示空仓） ----------------

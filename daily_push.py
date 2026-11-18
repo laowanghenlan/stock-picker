@@ -62,7 +62,7 @@ IC_GATE = app.IC_GATE                                 # 训练期组合IC低于�
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.43"
+APP_VERSION = "v1.44"
 
 
 FONT = "-apple-system,'PingFang SC','Microsoft YaHei',Arial,sans-serif"
@@ -449,7 +449,7 @@ def _render_html(d: dict) -> str:
     # —— 头部 ——
     h.append(f"<div style=\"background:{head_bg};padding:26px 26px 22px;\">")
     h.append(f"<div style=\"color:#ffffff;font-size:12px;letter-spacing:2px;opacity:.88;\">"
-             f"每日选股 · {d['date']}</div>")
+             f"老王每日选股 · {d['date']}</div>")
     h.append(f"<div style=\"color:#ffffff;font-size:26px;font-weight:700;margin-top:8px;"
              f"letter-spacing:1px;\">{d['tag']}</div>")
     h.append(f"<div style=\"color:#ffffff;font-size:13px;opacity:.92;margin-top:8px;\">"
@@ -682,7 +682,7 @@ def send(text: str, html: str):
     msg["From"] = TO_ADDR
     msg["To"] = TO_ADDR
     _slot_tag = "晚间" if _slot() == "pm" else "早间"
-    msg["Subject"] = Header(f"【{tag}】每日选股 {_today()[5:]}·{_slot_tag}", "utf-8")
+    msg["Subject"] = Header(f"【{tag}】老王每日选股 {_today()[5:]}·{_slot_tag}", "utf-8")
     # 顺序不能反：先纯文本后 HTML，客户端会优先显示最后一段
     msg.attach(MIMEText(text, "plain", "utf-8"))
     msg.attach(MIMEText(html, "html", "utf-8"))
