@@ -54,8 +54,9 @@ class DzhMcpClient:
     """大智慧 MCP streamable-http 客户端。"""
 
     def __init__(self, key, endpoint=ENDPOINT, auth="key", timeout=40):
-        if not key or not str(key).startswith("sk-mcp-"):
-            raise DzhMcpError("KEY 为空或格式不对（应为 sk-mcp- 开头）。")
+        # 官方实际下发的 KEY 有两种前缀：sk-mcp- / sk_dzh_；只做非空+长度校验，不锁死前缀
+        if not key or len(str(key).strip()) < 16:
+            raise DzhMcpError("KEY 为空或过短（官方 KEY 形如 sk-mcp-xxxx 或 sk_dzh_xxxx）。")
         self.key = key.strip()
         self.endpoint = endpoint
         self.auth = auth  # 'key' 官方推荐；'bearer' 备用
@@ -192,7 +193,7 @@ class DzhMcpClient:
     # ---------- 高层业务封装 ----------
     def capital_inflow_min(self, codes):
         """资金流向分时(最新交易日) → {大智慧代码: {...}}"""
-        raw = self.call_tool("getAShareLhbData", {
+        raw = self.call_tool("ai-mcp-open_tools_getAShareLhbData", {
             "param": {"stockCodes": codes, "getCapitalinflowMin": True}
         })
         out = {}
@@ -214,7 +215,7 @@ class DzhMcpClient:
 
     def lhb_last_month(self, codes):
         """近一月龙虎榜明细 → {大智慧代码: {次数, 最近上榜日, 最近涨幅%}}"""
-        raw = self.call_tool("getAShareLhbData", {
+        raw = self.call_tool("ai-mcp-open_tools_getAShareLhbData", {
             "param": {"stockCodes": codes, "getF10LhbGpmxData": {}}
         })
         out = {}
@@ -252,7 +253,12 @@ class DzhMcpClient:
 
 
 def to_dz(code):
-    c = str(code).strip().zfill(6)
+    c = str(code).strip().upper()
+    # 已是 SH600410 / SZ000858 形式：校验后原样返回
+    if len(c) == 8 and c[:2] in ("SH", "SZ") and c[2:].isdigit():
+        return c
+    # 纯数字 6 位：按首位补前缀
+    c = c.zfill(6)
     if len(c) != 6 or not c.isdigit():
         return None
     return ("SH" if c[0] == "6" else "SZ") + c

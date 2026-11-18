@@ -368,7 +368,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.32"     # v1.32 T+1精筛内嵌进「今日选股」按钮：点一次直接出精筛后最终股票(复用候选K线现算8特征→内嵌LightGBM打分重排,模型base64内嵌绕中文路径,样本外+1.56%/期);沿用 v1.31 KEY直连客户端+v1.30 资金流标注层+v1.29 粗筛→精筛+v1.28 全部技术因子粗筛+v1.27 台账+v1.26 复盘净额
+APP_VERSION = "v1.33"     # v1.33 大智慧KEY直连实测跑通(修3bug:sk_dzh_前缀兼容/SH-SZ代码解析/工具全名)，端到端拉数→快照→dzh_enrich衔接验证;沿用 v1.32 T+1精筛内嵌今日选股+v1.31 KEY直连客户端+v1.30 资金流标注层+v1.29 粗筛→精筛+v1.28 全部技术因子粗筛+v1.27 台账+v1.26 复盘净额
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
