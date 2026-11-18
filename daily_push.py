@@ -62,7 +62,7 @@ IC_GATE = app.IC_GATE                                 # 训练期组合IC低于�
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.52"   # 与 app.py 同步（v1.52 减持标签分层标注🔴新减持；邮件逻辑未动）
+APP_VERSION = "v1.53"   # 与 app.py 同步（v1.53 邮件也显示减持:build_plan_items批量查近90天减持+文本/HTML两版渲染🔴新减持,失败降级—）
 
 
 FONT = "-apple-system,'PingFang SC','Microsoft YaHei',Arial,sans-serif"
@@ -80,6 +80,23 @@ def build_plan_items(plan: pd.DataFrame, ranked: pd.DataFrame, capital: float) -
         except Exception:
             return default
 
+    # v1.53 股东减持标签（纯展示，与 web 端口径一致）：一次批量查入选股近90天减持，
+    # 累计比例按90天；最新公告≤30天标🔴新减持。失败降级"—"，绝不影响发邮件。
+    try:
+        reduce_map = app.reduce_label_impl([str(p["代码"]).zfill(6) for _, p in plan.iterrows()])
+    except Exception:
+        reduce_map = {}
+    _new_cutoff = (_datetime.date.today() - _datetime.timedelta(days=30)).isoformat()
+
+    def _reduce_tag(code: str) -> str:
+        d = reduce_map.get(str(code).zfill(6))
+        if not d or d.get("n", 0) == 0:
+            return "—"
+        tag = f"减持{d['ratio']:.2f}%·{d['n']}笔"
+        if str(d.get("last_date", ""))[:10] >= _new_cutoff:
+            return f"🔴新减持 {tag}"
+        return tag
+
     items = []
     for _, p in plan.iterrows():
         code = str(p["代码"]).zfill(6)
@@ -90,6 +107,7 @@ def build_plan_items(plan: pd.DataFrame, ranked: pd.DataFrame, capital: float) -
             "名称": p["名称"], "代码": code, "现价": float(p["现价"]),
             "股数": int(p["买入股数"]), "投入": invest,
             "仓位占比": invest / capital * 100 if capital else 0.0,
+            "股东减持": _reduce_tag(code),      # v1.53 纯展示标签
             "盈利概率": float(p["盈利概率"]),
             "止损": float(p["止损价(买入价×0.95)"]),
             "止盈": float(p["止盈参考(买入价×1.10)"]),
@@ -316,7 +334,8 @@ def _collect(precomputed=None, archive: bool = True) -> dict:
 def _norm_pick(p: dict) -> dict:
     """补齐 ranked 派生的可选字段：网页端点没传 ranked 时这些字段缺失，统一补 None 表示"不展示" """
     return {**{"今日涨跌": None, "量比": None, "行业": "", "回测收益": None,
-               "回测胜率": None, "最大回撤": None, "交易次数": None}, **p}
+               "回测胜率": None, "最大回撤": None, "交易次数": None,
+               "股东减持": "—"}, **p}
 
 
 # ========== 纯文本版（不支持 HTML 的客户端兜底） ==========
@@ -360,7 +379,8 @@ def _render_text(d: dict) -> str:
     lines.append("")
     for p0 in d["plan"]:
         p = _norm_pick(p0)
-        lines.append(f"【{p['名称']}】{p['代码']}" + (f" · {p['行业']}" if p["行业"] else ""))
+        lines.append(f"【{p['名称']}】{p['代码']}" + (f" · {p['行业']}" if p["行业"] else "")
+                     + (f" · 股东减持 {p['股东减持']}" if p.get("股东减持", "—") != "—" else ""))
         chg = f"（今日 {p['今日涨跌']:+.2f}%）" if p["今日涨跌"] is not None else ""
         lines.append(
             f"  现价 {p['现价']:.2f} 元{chg} | 推荐价 {p['现价']:.2f} 元 | "
@@ -541,11 +561,18 @@ def _render_html(d: dict) -> str:
         h.append("<div style=\"border:1px solid #e6e9ee;border-radius:12px;padding:16px 18px;"
                  "margin-bottom:12px;\">")
         # 标题行：名称/代码/行业 + 现价与今日涨跌
+        _reduce = p.get("股东减持", "—")
+        _reduce_html = ""
+        if _reduce != "—":
+            _rc = "#d93025" if "新减持" in _reduce else "#8b949e"   # 🔴新减持红色醒目，普通减持灰色
+            _reduce_html = (f"<span style=\"font-size:11px;color:{_rc};font-weight:400;\">"
+                            f" · {_reduce}</span>")
         h.append("<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\"><tr>"
                  f"<td style=\"font-size:16px;font-weight:700;color:#1f2328;\">{p['名称']}"
                  f"<span style=\"font-size:12px;color:#8b949e;font-weight:400;\"> {p['代码']}</span>"
                  + (f"<span style=\"font-size:11.5px;color:#8b949e;font-weight:400;\"> · {p['行业']}</span>"
                     if p["行业"] else "")
+                 + _reduce_html
                  + f"</td><td align=\"right\" style=\"font-size:19px;font-weight:700;color:{chg_color};\">"
                  f"{p['现价']:.2f}{chg_html}</td></tr></table>")
 
