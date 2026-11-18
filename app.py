@@ -363,7 +363,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.30"     # v1.30 接入大智慧MCP资金流/龙虎榜做精筛辅助标注层(dzh_enrich.py,不进打分核心未验证)+资金流历史库积累;沿用 v1.29 粗筛→精筛链路 + v1.28 全部技术因子粗筛 + v1.27 台账回填 + v1.26 复盘净额
+APP_VERSION = "v1.31"     # v1.31 新增 dzh_mcp_http.py：用官方 sk-mcp KEY 直连大智慧 MCP 的 HTTP 端点，脚本可自动拉资金流/龙虎榜(替代对话落盘半自动);沿用 v1.30 资金流标注层(不进打分核心未验证)+v1.29 粗筛→精筛+v1.28 全部技术因子粗筛+v1.27 台账+v1.26 复盘净额
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
