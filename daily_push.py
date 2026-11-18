@@ -62,7 +62,7 @@ IC_GATE = app.IC_GATE                                 # 训练期组合IC低于�
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.33"
+APP_VERSION = "v1.34"
 
 
 FONT = "-apple-system,'PingFang SC','Microsoft YaHei',Arial,sans-serif"
