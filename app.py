@@ -374,7 +374,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.49"     # v1.49 新增「T+1交易成本计算器」折叠面板:输入本金/股价/只数,实时算往返总费用(佣金万2.5最低5元+印花税0.05%卖出+过户费0.001%双向)、回本涨幅门槛(含双边滑点0.1%)、费用占比、成本视角最优只数(单笔≥2万避开5元佣金封底)、多只数对比表;纯本地计算screen_service.cost_calculator无副作用,口径与allocate/best_plan一致,不改选股/打分/精筛/风控。沿用 v1.48 P0修复线上KeyError:REVIEW_CACHE_KEY v1.22→v1.48强制st.cache_data旧复盘缓存失效(旧缓存无「当时盈利概率」列,g[_cols]报错整页白屏)+app展示前兜底缺列补—;沿用 v1.47 邮件历史表现也显示盈利概率:复盘明细/上一次推送卡片的文本版+HTML版四段渲染都补上「当时概率」列(v1.46只加了数据字段没接渲染层,邮件看不到);沿用 v1.46 历史复盘加「当时盈利概率」列:推送留档存下当时的校准盈利概率(web端app.py+邮件端daily_push.py两条路径)+复盘表与盈亏%并排对照,旧批次无留档显示—不编造;沿用 v1.45 价格带严格生效:去掉CSI成分股价格上限豁免(旧逻辑让100~500元高价股也进池)+下限5→8元+页面显示完整区间8~50;沿用 v1.44 改名老王每日选股+v1.43 P0修复(漏import numpy致选股恒空)+v1.42 提速四项+v1.41 舆情直连降级放行+v1.40 去持仓体检+v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
+APP_VERSION = "v1.50"     # v1.50 把成本计算器集成进选股结果区(用户要求"点今日选股后在股票只数这加进去"):删除v1.49独立折叠面板,改为在"今日选出N只"前用本次真实plan逐笔算——4个metric(往返费用/回本涨幅门槛含双边滑点/费用占买入/本次只数vs成本最优只数)+触底佣金告警+「不同只数成本对比」折叠表(按本次均价试算供对照不改方案);卖出费用逐笔按max(5,amt×0.00025)+印花税+过户费算(大额单只更准);纯展示不改选股/打分/精筛/风控。沿用 v1.49 新增「T+1交易成本计算器」折叠面板:输入本金/股价/只数,实时算往返总费用(佣金万2.5最低5元+印花税0.05%卖出+过户费0.001%双向)、回本涨幅门槛(含双边滑点0.1%)、费用占比、成本视角最优只数(单笔≥2万避开5元佣金封底)、多只数对比表;纯本地计算screen_service.cost_calculator无副作用,口径与allocate/best_plan一致,不改选股/打分/精筛/风控。沿用 v1.48 P0修复线上KeyError:REVIEW_CACHE_KEY v1.22→v1.48强制st.cache_data旧复盘缓存失效(旧缓存无「当时盈利概率」列,g[_cols]报错整页白屏)+app展示前兜底缺列补—;沿用 v1.47 邮件历史表现也显示盈利概率:复盘明细/上一次推送卡片的文本版+HTML版四段渲染都补上「当时概率」列(v1.46只加了数据字段没接渲染层,邮件看不到);沿用 v1.46 历史复盘加「当时盈利概率」列:推送留档存下当时的校准盈利概率(web端app.py+邮件端daily_push.py两条路径)+复盘表与盈亏%并排对照,旧批次无留档显示—不编造;沿用 v1.45 价格带严格生效:去掉CSI成分股价格上限豁免(旧逻辑让100~500元高价股也进池)+下限5→8元+页面显示完整区间8~50;沿用 v1.44 改名老王每日选股+v1.43 P0修复(漏import numpy致选股恒空)+v1.42 提速四项+v1.41 舆情直连降级放行+v1.40 去持仓体检+v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
 
 st.set_page_config(page_title="老王每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
@@ -469,42 +469,6 @@ with st.sidebar:
                 st.caption(f"📦 数仓：{_wh.get('status', '未初始化')}（不影响选股，自动降级到 CSV）")
 
 # MAX_PRICE 已从 screen_service 导入，由 strategy_config.json 决定
-
-# ---------------- T+1 交易成本计算器（v1.49，纯本地计算，输入本金/股价即出回本门槛） ----------------
-with st.expander("💰 T+1 交易成本计算器（本金 → 回本门槛 / 合理只数）", expanded=False):
-    st.caption("一买一卖的全部费用：佣金万2.5（单笔最低5元）+ 印花税0.05%（卖出）+ 过户费0.001%（双向），"
-               "回本门槛另含双边滑点各0.1%。口径与选股扣费完全一致，纯本地计算不改任何策略。")
-    _cc1, _cc2 = st.columns(2)
-    with _cc1:
-        _cc_cap = st.number_input("本金（元）", min_value=100.0, value=float(capital), step=1000.0,
-                                  format="%.0f", key="cost_calc_cap",
-                                  help="默认带出侧边栏本金，可单独改来试算，不影响选股")
-    with _cc2:
-        _cc_price = st.number_input("假设股价（元/股）", min_value=1.0, value=float((MIN_PRICE + MAX_PRICE) / 2),
-                                    step=1.0, format="%.1f", key="cost_calc_price",
-                                    help="用来算100股整数位的成交金额，默认取价格带中值")
-    _cc_n = st.number_input("持股只数（0=按成本自动建议）", min_value=0, max_value=20, value=0, step=1,
-                            key="cost_calc_n",
-                            help="每只票单笔低于2万元会触发5元最低佣金，占比被抬高")
-    _cc = cost_calculator(_cc_cap, _cc_price, _cc_n)
-    _cc_d = _cc["detail"]
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("往返总费用", f"{_cc_d['往返合计']:.2f} 元",
-              help=f"买入佣金 {_cc_d['买入佣金']:.2f} + 卖出费用 {_cc_d['卖出费用']:.2f}")
-    m2.metric("回本涨幅门槛", f"{_cc_d['回本涨幅%']:.3f}%",
-              help="股价要涨过这个比例才不亏手续费+滑点")
-    m3.metric("费用占本金", f"{_cc_d['费用占比%']:.3f}%")
-    m4.metric("成本最优只数", f"{_cc['建议只数']} 只",
-              help=f"单笔≥{_cc['临界本金']:.0f}元才不被5元最低佣金惩罚；实际只数由预期收益决定")
-    if _cc_d["最低佣金封底"]:
-        st.warning(f"⚠️ 每只仅 {_cc_d['每只金额']:.0f} 元 < {_cc['临界本金']:.0f} 元，"
-                   "佣金被5元最低标准顶住，费用占比明显偏高——减少只数或增加本金可摊薄。")
-    st.caption("不同只数对比（本金平均分配、按100股取整）：")
-    st.dataframe(pd.DataFrame(_cc["rows"])[
-        ["只数", "每只股数", "每只金额", "往返合计", "费用占比%", "回本涨幅%", "最低佣金封底"]
-    ], width="stretch", hide_index=True)
-    st.caption("注：滑点是回测假设（实盘看流动性）；'最低佣金封底'为True表示该只金额太小、佣金按5元收。"
-               "此工具只算摩擦成本，不代表任何收益预测，也不构成投资建议。")
 
 # ---------------- 历史推荐复盘（按需加载，避免云端启动时网络 hang 导致白屏） ----------------
 with st.expander(f"📊 历史推荐复盘（最近{REVIEW_N}批）", expanded=False):
@@ -899,14 +863,37 @@ if run:
     m3.metric("至少一只盈利概率", f"{p_any * 100:.0f}%")
     m4.metric("剩余现金", f"{leftover:.0f} 元")
 
-    # ---- 交易成本明细：买入佣金 + 卖出预计费用（佣金/印花税/过户费） ----
+    # ---- 交易成本计算器（v1.50 集成）：用本次真实选出的股票逐笔算，输出费用/回本门槛/成本最优只数 ----
+    # 口径与 screen_service.cost_calculator / allocate / best_plan 完全一致，只是把本就扣过的成本明面展示
     _amt = float((plan["买入股数"] * plan["现价"]).sum())
     _buy_fee = float((plan["投入(含佣金)"] - plan["买入股数"] * plan["现价"]).sum())
-    _sell_fee = float((5.0 + plan["买入股数"] * plan["现价"] * 0.00051).sum())   # 最低佣金5元+印花税0.05%+过户费
-    st.caption(f"💰 交易成本：买入佣金 **{_buy_fee:.2f} 元**（费率万2.5，单笔最低5元）· "
-               f"卖出预计 **{_sell_fee:.2f} 元**（佣金+印花税0.05%+过户费）· "
-               f"一买一卖合计 **{_buy_fee + _sell_fee:.2f} 元**，"
-               f"占买入金额 {(_buy_fee + _sell_fee) / _amt * 100:.2f}%（约等于股价要涨这么多才回本）")
+    # 卖出逐笔（每只单独触底判断，单只≥2万按比例、否则5元封底），与 best_plan 同口径
+    _amt_each = (plan["买入股数"] * plan["现价"]).tolist()   # 每只成交额数组
+    _sell_fee = float(sum(max(5.0, a * 0.00025) + a * 0.0005 + a * 0.00001 for a in _amt_each))
+    _fee_total = _buy_fee + _sell_fee
+    _slip = _amt * 0.001 * 2                       # 双边滑点 0.1%×2（回本门槛口径）
+    _be_pct = (_fee_total + _slip) / _amt * 100 if _amt > 0 else 0.0
+    _fee_pct = _fee_total / _amt * 100 if _amt > 0 else 0.0
+    # 用本次真实平均股价试算不同只数的成本，给出"成本视角最优只数"供对照（不改实际方案）
+    _avg_price = float((plan["买入股数"] * plan["现价"]).sum() / plan["买入股数"].sum())
+    _cc = cost_calculator(float(capital), _avg_price, 0)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("往返费用", f"{_fee_total:.2f} 元",
+              help=f"买入佣金 {_buy_fee:.2f}（万2.5/笔最低5元）+ 卖出 {_sell_fee:.2f}（含印花税0.05%）")
+    c2.metric("回本涨幅门槛", f"{_be_pct:.3f}%", help="股价涨过这个比例才不亏手续费+双边滑点")
+    c3.metric("费用占买入", f"{_fee_pct:.3f}%")
+    c4.metric("本次 {n} 只 / 成本最优 {m} 只".format(n=len(plan), m=_cc["建议只数"]),
+              help=f"单笔≥{_cc['临界本金']:.0f}元才不被5元最低佣金惩罚；实际只数由预期收益定")
+    if _cc["detail"]["最低佣金封底"] and len(plan) > 1:
+        st.caption(f"⚠️ 每只均价约 {_avg_price:.1f} 元、平均投入 {_amt/len(plan):.0f} 元 < "
+                   f"{_cc['临界本金']:.0f} 元，佣金被5元最低标准顶住、费用占比偏高；"
+                   "若只求省手续费，减少只数或增加本金可摊薄（但会牺牲分散度，实际只数由预期收益决定）。")
+    with st.expander("💰 不同只数的成本对比（按本次均价试算，仅供对照、不改方案）", expanded=False):
+        st.caption("佣金万2.5（单笔最低5元）+ 印花税0.05%卖出 + 过户费0.001%双向；回本门槛另含双边滑点各0.1%。"
+                   "纯本地计算，口径与选股扣费一致。")
+        st.dataframe(pd.DataFrame(_cc["rows"])[
+            ["只数", "每只股数", "每只金额", "往返合计", "费用占比%", "回本涨幅%", "最低佣金封底"]
+        ], width="stretch", hide_index=True)
 
     _headline = "🎯 今日 T+1 精筛最终名单" if _t1_applied else "今日选出"
     st.success(f"{_headline} {len(plan)} 只，方案如下：")

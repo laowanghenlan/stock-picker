@@ -62,7 +62,7 @@ IC_GATE = app.IC_GATE                                 # 训练期组合IC低于�
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.49"   # 与 app.py 同步（v1.49 新增T+1交易成本计算器面板，邮件逻辑未动）
+APP_VERSION = "v1.50"   # 与 app.py 同步（v1.50 成本计算器集成进选股结果区，邮件逻辑未动）
 
 
 FONT = "-apple-system,'PingFang SC','Microsoft YaHei',Arial,sans-serif"
