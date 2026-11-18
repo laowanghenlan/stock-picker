@@ -8,6 +8,7 @@ from pathlib import Path
 
 import akshare as ak
 import factors  # L1 多因子层：动量/波动率/换手/估值 + 行业中性 + 20日IC均值配权
+import numpy as np  # v1.43 修复：_snap() 用 np.nan，此前漏导入导致全候选 NameError 被吞、res 恒为空
 import pandas as pd
 import requests
 
@@ -829,6 +830,7 @@ def verify_impl(cands: pd.DataFrame, progress,
     start_d = end_d - dt.timedelta(days=HISTORY_DAYS)
     rows, hists, meta = [], {}, {}          # hists/meta：供因子面板与行业中性化使用
     hist_failed, news_failed = [], []       # 取数失败名单：区分"数据源不可用"与"候选不合格"
+    verify_errors = []                      # v1.43: 每只候选处理异常的记录（诊断用，防静默吞错）
     fundamentals = {}                         # {代码: baostock财报DataFrame}，给基本面因子用
     total = len(cands)
     # ===== Tushare Pro 可选增强：配置了 TUSHARE_TOKEN 才启用，补齐快照缺失的 PE/PB/换手率 =====
@@ -973,10 +975,14 @@ def verify_impl(cands: pd.DataFrame, progress,
                 "有雷": len(risk_hits) > 0, "利空标题": "；".join(risk_hits[:2]),
                 "舆情未核实": news_unverified,     # v1.41：True=接口失败降级放行，风险未经核实
             })
-        except Exception:
-            continue                                    # 单只失败不影响整体
+        except Exception as _e:
+            # v1.43：不再静默吞异常。单只失败仍跳过，但要记录原因——
+            # 此前 _snap 的 np NameError 被这里吞掉，30只全灭却只显示"回测不合格"，极难定位。
+            verify_errors.append({"代码": code, "错误": f"{type(_e).__name__}: {str(_e)[:120]}"})
+            continue
         progress(0.65 + 0.35 * (i + 1) / total, f"回测验证中 {i + 1}/{total}：{r['名称']}")
     res = pd.DataFrame(rows)
+    res.attrs["verify_errors"] = verify_errors    # v1.43: 被跳过的候选及原因（诊断用）
     res.attrs["hist_failed"] = hist_failed      # 行情取数失败的候选（数据源问题，非选股结论）
     res.attrs["news_failed"] = news_failed      # v1.41：舆情双源失败、降级放行（未核实）的候选，仅告警不剔除
     res.attrs["n_cands"] = total

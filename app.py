@@ -369,7 +369,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.42"     # v1.42 提速四项:舆情东财+巨潮双源并行+快照首源成功即返回(关多源串行对账)+行情缓存30min→2h+K线单源超时15s→8s;沿用 v1.41 舆情直连东财+降级放行+v1.40 去持仓体检+v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
+APP_VERSION = "v1.43"     # v1.43 P0修复:screen_service漏import numpy导致_snap的np.nan抛NameError被except吞,全候选剔除res恒空→"候选股均未通过验证";补import numpy+verify_errors记录+错误文案透出;沿用 v1.42 提速四项+v1.41 舆情直连降级放行+v1.40 去持仓体检+v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
@@ -585,7 +585,14 @@ if run:
             st.warning("行情数据源暂时不可用（东财限流、新浪未返回有效数据），本次无法完成验证。"
                        "这不是选股结论，请稍后重试，不建议据此操作。")
         else:
-            st.warning("候选股均未通过验证（历史不足/回测不合格），今天不建议买入。")
+            # v1.43：候选处理异常优先显示真实原因，不再一律甩锅"回测不合格"。
+            _ve = res.attrs.get("verify_errors", [])
+            if _ve:
+                _sample = _ve[0].get("错误", "未知错误")
+                st.error(f"⚠️ 候选股处理时程序出错（不是选股结论，也不是股票不好）：{_sample}。"
+                         f"共 {len(_ve)} 只受影响，请把这个提示反馈给维护者修复。")
+            else:
+                st.warning("候选股均未通过验证（历史不足/回测不合格），今天不建议买入。")
         st.stop()
     _nf = res.attrs.get("news_failed", [])
     if _nf:
