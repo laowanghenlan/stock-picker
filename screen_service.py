@@ -284,6 +284,10 @@ _ml_cfg = _cfg().get("机器学习", {})
 ML_ENABLED = bool(_ml_cfg.get("启用", True))            # LightGBM加分项总开关
 ML_WEIGHT = max(0.0, min(0.5, float(_ml_cfg.get("权重", 0.20))))   # 占总分比例，上限50%
 ML_ENSEMBLE_ENABLED = bool(_ml_cfg.get("集成精筛", True))  # Stage3 三模型集成精筛总开关
+# v1.38 提速：财报(bastock)串行拉取是最大耗时点(15只×最多20秒=上限5分钟)，
+# 而实测基本面因子在训练面板100% NaN、ML只用5个价格因子，拉回来几乎不起作用。
+# 默认关闭，fundamentals={} → 基本面因子全NaN自动跳过。要用改 config「观测→拉取财报」=true。
+FETCH_FUNDAMENTAL = bool(_cfg().get("观测", {}).get("拉取财报", False))
 STOP_LOSS_PCT = float(_risk.get("止损%", 0.05))
 TAKE_PROFIT_PCT = float(_risk.get("止盈%", 0.10))
 STOP_LOSS_PCT = STOP_LOSS_PCT  # 用 config 的覆盖
@@ -789,34 +793,38 @@ def verify_impl(cands: pd.DataFrame, progress,
                     cands[dst] = pd.to_numeric(cands[dst], errors="coerce").fillna(cands[src])
     except Exception:
         pass                                    # 增强失败不影响原有快照字段
-    # ===== 逐票拉候选股基本面（Baostock 历史财报，免费，消除估值因子前视偏差）=====
-    try:
-        if _BAOSTOCK_TIMED_OUT:
-            raise TimeoutError("Baostock 此前已无响应")
-        import fundamental as fd
-        fundamental_deadline = time.monotonic() + 300
-        for fi, cd in enumerate(cands["代码"].astype(str).str.zfill(6).tolist(), 1):
-            if time.monotonic() >= fundamental_deadline:
-                fundamentals = {}
-                progress(0.3, "财报拉取超过5分钟，本次统一按基本面缺失降级")
-                break
-            progress(0.3 * fi / total, f"拉取财报 {fi}/{total}（baostock 串行，今日首次较慢）")
+    # ===== 逐票拉候选股基本面（Baostock 历史财报）=====
+    # v1.38 提速：默认跳过（FETCH_FUNDAMENTAL=False）。财报串行拉取是最大耗时点，
+    # 且实测基本面因子对打分几乎无贡献（训练面板全NaN、ML只用价格因子）。
+    # 需要时把 config「观测→拉取财报」设为 true 即可恢复原行为。
+    if FETCH_FUNDAMENTAL:
+        try:
+            if _BAOSTOCK_TIMED_OUT:
+                raise TimeoutError("Baostock 此前已无响应")
+            import fundamental as fd
+            fundamental_deadline = time.monotonic() + 300
+            for fi, cd in enumerate(cands["代码"].astype(str).str.zfill(6).tolist(), 1):
+                if time.monotonic() >= fundamental_deadline:
+                    fundamentals = {}
+                    progress(0.3, "财报拉取超过5分钟，本次统一按基本面缺失降级")
+                    break
+                progress(0.3 * fi / total, f"拉取财报 {fi}/{total}（baostock 串行，今日首次较慢）")
 
-            def _fetch_fundamental():
-                try:
-                    return fd.fetch_fundamental(cd)
-                except Exception:
-                    return pd.DataFrame()
+                def _fetch_fundamental():
+                    try:
+                        return fd.fetch_fundamental(cd)
+                    except Exception:
+                        return pd.DataFrame()
 
-            fundamental = _run_with_timeout(_fetch_fundamental, timeout=20)
-            if fundamental is None:
-                _BAOSTOCK_TIMED_OUT = True
-                fundamentals = {}
-                progress(0.3, "财报接口超时，本次统一按基本面缺失降级")
-                break
-            fundamentals[cd] = fundamental
-    except Exception:
-        fundamentals = {}  # Baostock 整体不可用，降级：基本面因子全 NaN，自动跳过
+                fundamental = _run_with_timeout(_fetch_fundamental, timeout=20)
+                if fundamental is None:
+                    _BAOSTOCK_TIMED_OUT = True
+                    fundamentals = {}
+                    progress(0.3, "财报接口超时，本次统一按基本面缺失降级")
+                    break
+                fundamentals[cd] = fundamental
+        except Exception:
+            fundamentals = {}  # Baostock 整体不可用，降级：基本面因子全 NaN，自动跳过
     # ===== K线+舆情 8 路并发预取（纯 HTTP 线程安全；baostock 单连接不能并发，保持串行）=====
     codes_all = cands["代码"].astype(str).str.zfill(6).tolist()
     hists_pre, news_pre = {}, {}

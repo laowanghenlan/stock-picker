@@ -99,9 +99,10 @@ def _probe_pipeline():
         pass
 
 
-# ---------------- 页面加载时自动探测一次数据源（无按钮，用户无感） ----------------
+# ---------------- 页面加载：不再首屏联网探测（v1.38 提速） ----------------
+# 旧版每次新会话都会 _probe_pipeline() 拉2只K线+1只财报，只为给折叠的"数据源健康"面板
+# 填首次数据，拖慢首屏。健康度在点「今日选股」时会自动积累，无需首屏预热。
 if not st.session_state.get("_health_probed"):
-    _probe_pipeline()
     st.session_state["_health_probed"] = True
     st.session_state["_health_last_update"] = time.time()
     # 实盘台账自动回填（一天最多一次，内部节流。云端/本地打开页面即触发，
@@ -406,7 +407,7 @@ def _dzh_fundflow_contrast(codes, key):
         return None, f"{type(e).__name__}: {str(e)[:120]}"
 
 
-APP_VERSION = "v1.37"     # v1.37 按用户要求从页面隐藏"实盘OOS台账·真实IC"展示区(数据照常后台记录/回填不删);沿用 v1.36 清除v1.24误导标签+顶部醒目版本横幅+v1.35 云端KEY修复+v1.34 资金流对照+v1.33 KEY直连+v1.32 T+1精筛+v1.31 KEY客户端+v1.30 标注层+v1.29 粗筛→精筛+v1.28 全因子+v1.27 台账+v1.26 复盘净额
+APP_VERSION = "v1.38"     # v1.38 web提速:默认跳过15只串行baostock财报拉取(config观测→拉取财报=false,基本面因子实测几乎无效)+去掉首屏联网健康探测,点选股省最多5分钟/首屏秒开;沿用 v1.37 隐藏台账+v1.36 清v1.24标签+v1.35 云端KEY修复+v1.34 资金流对照+v1.33 KEY直连+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
