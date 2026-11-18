@@ -369,7 +369,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.39"     # v1.39 按用户要求从页面去掉大智慧资金流对照(KEY设置区+结果对照展示,独立脚本dzh_mcp_http.py/dzh_enrich.py与云端Secrets保留,自己本地用);沿用 v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
+APP_VERSION = "v1.40"     # v1.40 按用户要求从页面去掉持仓体检(顶部expander+结果区体检表两处);持仓.csv与check_holdings逻辑保留本地可查,且省掉每次选股体检联网拉舆情;沿用 v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
 
 st.set_page_config(page_title="每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
@@ -394,14 +394,7 @@ else:
 # ---------------- 本金输入在侧边栏（见下方 sidebar 区块），此处仅保留说明 ----------------
 # capital / n_picks 在侧边栏代码里赋值；MIN_PRICE / MAX_PRICE 由 strategy_config.json 决定
 
-# ---------------- 我的持仓（自动读本地持仓.csv，每天选股时自动体检） ----------------
-with st.expander("💼 持仓体检（自动读持仓.csv，选股时自动执行）", expanded=True):
-    holdings = load_holdings()
-    if len(holdings) == 0 or holdings.iloc[0].isna().all():
-        st.info("📭 暂无持仓。有持仓想自动体检？编辑同目录下的 持仓.csv（列：代码,成本价,股数），下次选股自动识别。")
-        holdings = pd.DataFrame(columns=["代码", "成本价", "股数"])
-    else:
-        st.caption(f"已加载 {len(holdings)} 只持仓，选股时自动体检止损/止盈/利空。")
+# ---------------- 持仓体检：v1.40 按用户要求从页面隐藏（持仓.csv 与 check_holdings 逻辑保留，本地可查） ----------------
 
 # ---------------- 侧边栏：只保留本金输入（行情/复盘/因子/熔断全部自动） ----------------
 with st.sidebar:
@@ -560,16 +553,6 @@ if run:
     if market_cold and not force_run:
         st.error("大盘低温期，已拦截选股。请勾选上方「我知道风险，仍要选股」后再点。")
         st.stop()
-    # 持仓体检（持仓已在页面加载时自动从 持仓.csv 读取）
-    hd_check = check_holdings(holdings, get_spot())
-    if len(hd_check) > 0:
-        st.markdown("**💼 持仓体检**")
-        st.dataframe(hd_check, width="stretch", hide_index=True,
-                     column_config={"浮动盈亏%": st.column_config.NumberColumn(format="%+.2f%%")})
-        if (hd_check["操作"] != "✅ 继续持有").any():
-            st.warning("有持仓需要处理，先处理持仓再考虑买新股。")
-        st.markdown("---")
-
     _run_t0 = time.time()                      # v1.24: 漏斗视图耗时基准
     # v1.24 修复：这里必须用带缓存的 get_spot()。get_spot_impl() 是无缓存原始函数，
     # 会无视 30 分钟新鲜度、绕过"刚失败不重试"保护，在点击瞬间重新全市场联网拉一遍，
