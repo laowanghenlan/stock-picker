@@ -86,9 +86,11 @@ def news_risk_impl(code: str) -> list | None:
         return None
 
 
-def reduce_label_impl(codes, lookback_days: int = 90) -> dict:
-    """v1.51：候选股"股东减持"标签（**纯展示，不参与选股/打分/排序/排雷**）。
-    用东财 RPT_SHARE_HOLDER_INCREASE 一次请求批量拉近 lookback_days 天减持明细，
+def reduce_label_impl(codes, lookback_days: int = 60) -> dict:
+    """v1.55：候选股"股东减持"标签（**纯展示，不参与选股/打分/排序/排雷**）。
+    用东财 RPT_SHARE_HOLDER_INCREASE 一次请求批量拉近 lookback_days 天减持明细。
+    v1.55 用户要求窗口 90→60 天；web 与邮件都调用本函数默认参数，改这一处两端同步生效；
+    🔴新减持的 30 天分层在 app.py / daily_push.py 展示层，口径不变。
     按代码聚合累计减持占总股本比例(AFTER_CHANGE_RATE)、笔数、最新公告日。
     返回 {6位代码: {"ratio":累计减持%, "n":笔数, "last_date":"YYYY-MM-DD"}}。
     用正确字段 AFTER_CHANGE_RATE（不是报价涨跌幅 CHANGE_RATE）。

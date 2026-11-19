@@ -62,7 +62,7 @@ IC_GATE = app.IC_GATE                                 # 训练期组合IC低于�
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.54"   # 与 app.py 同步（v1.54 实盘台账改股票×交易日口径、新增T+1隔夜收益；邮件发信行为不变。前版v1.53 邮件也显示减持:build_plan_items批量查近90天减持+文本/HTML两版渲染🔴新减持,失败降级—）
+APP_VERSION = "v1.55"   # 与 app.py 同步（v1.55 减持窗口90→60天,邮件端经reduce_label_impl默认参数自动同步,30天🔴分层不变;纯展示不改发信。前版v1.54 实盘台账改股票×交易日口径、新增T+1隔夜收益;v1.53 邮件也显示减持:build_plan_items批量查减持+文本/HTML两版渲染🔴新减持,失败降级—）
 
 
 FONT = "-apple-system,'PingFang SC','Microsoft YaHei',Arial,sans-serif"
@@ -80,8 +80,9 @@ def build_plan_items(plan: pd.DataFrame, ranked: pd.DataFrame, capital: float) -
         except Exception:
             return default
 
-    # v1.53 股东减持标签（纯展示，与 web 端口径一致）：一次批量查入选股近90天减持，
-    # 累计比例按90天；最新公告≤30天标🔴新减持。失败降级"—"，绝不影响发邮件。
+    # 股东减持标签（纯展示，与 web 端口径一致）：一次批量查入选股近60天减持，
+    # v1.55 窗口90→60天(与web同函数默认参数,改screen_service一处两端同步)；
+    # 累计比例按60天；最新公告≤30天标🔴新减持。失败降级"—"，绝不影响发邮件。
     try:
         reduce_map = app.reduce_label_impl([str(p["代码"]).zfill(6) for _, p in plan.iterrows()])
     except Exception:
