@@ -1,0 +1,59 @@
+name: 周末训练与预测存档
+
+# 休息日不空转：用仓库自带历史数据包重训模型 + 跑一次选股存档（不发邮件、不污染实盘台账）。
+# 工作日仍由 daily_push.yml 负责早晚推送，本工作流只在周六/周日跑。
+# 北京时间周六/周日 09:00 = UTC 01:00。
+on:
+  schedule:
+    - cron: '0 1 * * 6,0'
+  workflow_dispatch:    # 支持手动补跑
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-push      # 与工作日推送共用并发组，避免同时改仓库/同时跑选股
+  cancel-in-progress: false
+
+jobs:
+  weekend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装依赖
+        run: python -m pip install -r requirements.txt
+
+      - name: 周末预测并存档（不发邮件）
+        run: |
+          # 脚本内已对 QQ_EMAIL/QQ_AUTH_CODE 兜底占位（本任务不调用 send，不需要真实邮箱）
+          python weekend_pipeline.py predict || echo "PREDICT_FAILED=1" >> $GITHUB_ENV
+
+      - name: 周末重新训练模型（IC 门控，坏模型不覆盖）
+        run: |
+          python weekend_pipeline.py train || echo "TRAIN_FAILED=1" >> $GITHUB_ENV
+
+      - name: 回传模型 / 周末存档 / 台账 / 状态
+        run: |
+          git config user.name "stock-bot"
+          git config user.email "stock-bot@local"
+          git pull --rebase --autostash origin master
+          git add models/ 周末预测存档.csv 周末任务状态.json 实盘台账.csv 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "无模型/存档变更，跳过提交"
+          else
+            git commit -m "周末训练+预测存档 $(date -u -d '+8 hours' +%F)"
+            git push
+          fi
+
+      - name: 汇总
+        run: |
+          echo "PREDICT_FAILED=${PREDICT_FAILED:-0} TRAIN_FAILED=${TRAIN_FAILED:-0}"
+          if [ "${PREDICT_FAILED:-0}" = "1" ] || [ "${TRAIN_FAILED:-0}" = "1" ]; then
+            echo "周末任务有子项失败（详见日志），但另一子项与回传照常执行"
+          fi
