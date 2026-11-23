@@ -62,7 +62,7 @@ IC_GATE = app.IC_GATE                                 # 训练期组合IC低于�
 
 
 # ---------- 版本号：与 app.py 的 APP_VERSION 保持同步 ----------
-APP_VERSION = "v1.57"   # 与 app.py 同步（v1.57 早班cron提前4小时=北京04:00触发(UTC前一日20:00,0-4)/预热03:30,晚班不变;只改.github/workflows/daily_push.yml的schedule,本模块发信逻辑零改动。前版v1.56 周末云端流水线:weekend.yml周六周日09:00跑weekend_pipeline.py的train(重训模型)+predict(选股写周末预测存档.csv,archive=False不污染台账/不发邮件);本模块_ collect被周末predict复用,无需改动。前版v1.55 减持窗口90→60天,邮件端经reduce_label_impl默认参数自动同步,30天🔴分层不变;纯展示不改发信。前版v1.54 实盘台账改股票×交易日口径、新增T+1隔夜收益;v1.53 邮件也显示减持:build_plan_items批量查减持+文本/HTML两版渲染🔴新减持,失败降级—）
+APP_VERSION = "v1.58"   # 与 app.py 同步（v1.58 题材冲刺开关=web端纯展示功能,默认关闭,不进邮件/不参与主打分;邮件端零改动。前版v1.57 早班cron提前4小时=北京04:00触发(UTC前一日20:00,0-4)/预热03:30,晚班不变;只改.github/workflows/daily_push.yml的schedule,本模块发信逻辑零改动。前版v1.56 周末云端流水线:weekend.yml周六周日09:00跑weekend_pipeline.py的train(重训模型)+predict(选股写周末预测存档.csv,archive=False不污染台账/不发邮件);本模块_ collect被周末predict复用,无需改动。前版v1.55 减持窗口90→60天,邮件端经reduce_label_impl默认参数自动同步,30天🔴分层不变;纯展示不改发信。前版v1.54 实盘台账改股票×交易日口径、新增T+1隔夜收益;v1.53 邮件也显示减持:build_plan_items批量查减持+文本/HTML两版渲染🔴新减持,失败降级—）
 
 
 FONT = "-apple-system,'PingFang SC','Microsoft YaHei',Arial,sans-serif"

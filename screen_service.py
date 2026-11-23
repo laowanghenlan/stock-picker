@@ -143,6 +143,107 @@ def reduce_label_impl(codes, lookback_days: int = 60) -> dict:
     return out
 
 
+# ---------------- v1.58 题材冲刺（默认关闭、纯展示、高风险） ----------------
+# 东财 push2 clist：与 akshare stock_board_concept_* 同源，云端直连无需大智慧 KEY。
+_EM_CLIST_URL = "https://push2.eastmoney.com/api/qt/clist/get"
+# 技术形态/宽基标签不是"题材"（昨日连板/涨停/融资融券/沪股通等），必须滤掉，
+# 否则 Top 榜前几名全是这类标签板，根本不是机器人/算力/半导体这种题材。
+_FAKE_THEME_KW = (
+    "昨日", "最近", "题材股", "高换手", "连板", "涨停", "首板", "多板", "打板",
+    "融资融券", "深股通", "沪股通", "机构", "基金", "QFII", "社保", "预盈",
+    "送转", "股权激励", "注册制", "次新", "ST股", "创业板", "科创", "AH股", "B股",
+    "标普", "富时", "MSCI", "上证", "中证", "破净", "低价", "高价", "超跌", "转融",
+    "长江三角", "雄安", "粤港澳", "自贸",
+)
+
+
+def _em_clist(params: dict, timeout: int = 12):
+    """东财 clist 通用请求，2 次重试；失败返回 None（绝不抛，题材是纯展示功能）。"""
+    for _ in range(2):
+        try:
+            r = requests.get(_EM_CLIST_URL, params=params,
+                             headers={"User-Agent": "Mozilla/5.0",
+                                      "Referer": "https://quote.eastmoney.com/"},
+                             timeout=timeout)
+            if r.status_code == 200 and r.text:
+                return r.json()
+        except Exception:
+            continue
+    return None
+
+
+def _theme_num(v, default=float("nan")) -> float:
+    """东财 '-'/None/非数字 → default（接口缺字段时不能让整表崩掉）。"""
+    try:
+        f = float(v)
+        return f if f == f else default
+    except (TypeError, ValueError):
+        return default
+
+
+def theme_sprint_impl(top_n: int = 3, per_theme: int = 6) -> pd.DataFrame:
+    """v1.58 题材冲刺：当日 Top 概念题材的成分股（**高风险、纯展示、默认关闭**）。
+
+    与主 screen_impl 刻意相反——放宽涨幅(无7%上限,允许涨停)、PE<0(允许亏损)、
+    量比>10(允许异常放量)、近月龙虎榜(允许游资票)，因为要找的就是强势题材票。
+    但保留基本安全底线：非ST/退市、价格 [MIN_PRICE, MAX_PRICE]（买得起）、成交额>5000万（卖得出）。
+
+    数据源：东财概念板块排名(fs=m:90+t:3) + 各题材成分股(fs=b:BKxxxx)，
+    云端直连即可，不依赖大智慧 KEY。失败降级返回空 DataFrame，绝不抛异常影响主选股。
+    """
+    try:
+        rank = _em_clist({"pn": 1, "pz": 120, "po": 1, "np": 1, "fltt": 2, "invt": 2,
+                          "fid": "f3", "fs": "m:90+t:3", "fields": "f12,f14,f3"})
+        rows = ((rank or {}).get("data") or {}).get("diff") or []
+        themes = []
+        for x in rows:
+            name = str(x.get("f14") or "")
+            code = str(x.get("f12") or "")
+            if not code or not name or any(k in name for k in _FAKE_THEME_KW):
+                continue
+            themes.append((code, name, _theme_num(x.get("f3"), 0.0)))
+        themes.sort(key=lambda t: t[2], reverse=True)
+        themes = themes[:max(1, int(top_n))]
+        if not themes:
+            return pd.DataFrame()
+
+        out = []
+        for bk, tname, tpct in themes:
+            data = _em_clist({"pn": 1, "pz": 60, "po": 1, "np": 1, "fltt": 2, "invt": 2,
+                              "fid": "f3", "fs": f"b:{bk}",
+                              "fields": "f12,f14,f2,f3,f6,f8,f9,f10,f20,f62"})
+            cons = ((data or {}).get("data") or {}).get("diff") or []
+            cons = sorted(cons, key=lambda x: _theme_num(x.get("f3"), -999), reverse=True)
+            n = 0
+            for c in cons:
+                if n >= per_theme:
+                    break
+                code = str(c.get("f12") or "").zfill(6)
+                name = str(c.get("f14") or "")
+                price = _theme_num(c.get("f2"))
+                amount = _theme_num(c.get("f6"), 0.0)
+                if not code or "ST" in name.upper() or "退" in name:
+                    continue
+                if not (MIN_PRICE <= price <= MAX_PRICE):     # 买得起
+                    continue
+                if amount <= 5e7:                              # 卖得出
+                    continue
+                out.append({
+                    "题材": tname, "题材涨幅%": round(tpct, 2),
+                    "代码": code, "名称": name,
+                    "现价": round(price, 2), "涨幅%": round(_theme_num(c.get("f3")), 2),
+                    "换手%": round(_theme_num(c.get("f8")), 2),
+                    "量比": round(_theme_num(c.get("f10")), 2),
+                    "市盈率": round(_theme_num(c.get("f9")), 1),
+                    "市值(亿)": round(_theme_num(c.get("f20")) / 1e8, 1),
+                    "主力净流入(万)": round(_theme_num(c.get("f62")) / 1e4, 0),
+                })
+                n += 1
+        return pd.DataFrame(out)
+    except Exception:
+        return pd.DataFrame()
+
+
 def market_temperature_impl() -> tuple:
     """大盘温度：沪深300最新收盘 vs 60日均线。
     返回 (最新收盘, MA60, 是否低温期)。低温期=收盘在MA60下方，系统性下跌段，应空仓。

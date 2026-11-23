@@ -52,12 +52,20 @@ try:
     from screen_service import reduce_label_impl
 except Exception:
     reduce_label_impl = None
+# v1.58 题材冲刺（默认关闭、纯展示）：软导入防增量部署中间态白屏（同 v1.51.1 教训）
+try:
+    from screen_service import theme_sprint_impl
+except Exception:
+    theme_sprint_impl = None
 
 # 缓存包装：web UI 一律调 news_risk；GitHub Actions 等裸运行环境请调 news_risk_impl
 news_risk = st.cache_data(ttl=3600, show_spinner=False)(news_risk_impl)
 # v1.51 股东减持标签：缓存1小时（减持公告按日更新，无需每次选股都拉），纯展示不影响选股
 reduce_labels = (st.cache_data(ttl=3600, show_spinner=False)(reduce_label_impl)
                  if reduce_label_impl is not None else lambda codes: {})
+# v1.58 题材冲刺：缓存10分钟（盘中题材排名变动快但不需秒级刷新）；函数缺失时返回空表
+theme_sprint = (st.cache_data(ttl=600, show_spinner=False)(theme_sprint_impl)
+                if theme_sprint_impl is not None else (lambda *a, **k: pd.DataFrame()))
 
 # 缓存包装：web UI 一律调 market_temperature；裸运行环境请调 market_temperature_impl
 market_temperature = st.cache_data(ttl=3600, show_spinner="正在检查大盘温度...")(market_temperature_impl)
@@ -383,7 +391,7 @@ screen = screen_impl
 # web UI 沿用原名 verify；GitHub Actions 等裸运行环境请调 verify_impl
 verify = verify_impl
 
-APP_VERSION = "v1.57"     # v1.57 早班cron提前4小时(北京04:00触发=UTC前一日20:00,0-4;预热03:30=UTC19:30):GitHub免费仓库schedule实测延迟4~5h(近5天早班实际触发11:51~13:35),提前4h让实际到信落08:00~09:00;晚班19:30/20:00不变,周末流水线不变,策略/打分/选股/发信逻辑零改动。前版 v1.56 周末云端流水线(GitHub Actions周六周日09:00):重训模型(用仓库自带training_data/wf_cache_bundle.tar.gz解压→pretrain,IC门控坏模型不覆盖)+跑一次选股写独立周末预测存档.csv(复用daily_push._collect,archive=False不污染推送记录/实盘台账,不联网发邮件,只回填到期台账样本);prediction/train两模式独立降级互不影响;新增weekend_pipeline.py+weekend.yml。策略/打分/排序/选股主流程零改动,不改工作日推送。前版 v1.55 股东减持标签窗口90→60天(用户要求"天数改为60天之内"):screen_service.reduce_label_impl默认lookback_days 90→60,web与邮件都调此函数默认参数故改一处两端同步;🔴新减持30天分层不变(累计比例按60天算,最新公告≤30天标🔴);app caption与daily_push注释文案同步改60天;纯展示口径改动,不改选股/打分/排序/排雷。验证:离线9项断言全过(默认60天filter起始日/60天内聚合/80天前不计/AFTER_CHANGE_RATE字段正确/30天分层/显式覆盖兼容/失败降级—),py_compile过。前版 v1.54 实盘台账改为「股票×交易日」口径:去重键日期+推送时间+代码→日期+代码(一天点多次选股不重复计数,保留最后一次名单且已回填行优先不被抹掉);新增T+1隔夜收益(用户真实打法今收买明收卖)——买入价=推荐日(或之后最近交易日)收盘价(非点击现价,消除盘中多次点击的基准漂移),卖出价=下一交易日收盘,毛收益=卖/买-1,净收益=毛-0.40%往返成本(佣金万2.5双边触底5元+印花0.05%卖出+过户0.001%双边+双边滑点各0.1%的保守估计);新增列T+1买入日/T+1买入价/实际T+1收益%/T+1净收益%,旧表缺列自动补全;周末推送顺延到下一交易日买入;5/10日预测口径不变(基准仍为点击现价);update与record共用_dedup,旧格式同日多批次残留(如迁移前11-18两批)在下次回填时自动收敛到一天一条。纯记账口径改动,不改选股/打分/排序/邮件发信行为(邮件照常每次点都发,按用户选择不动)。验证:离线16项断言全过(同日3次合并/保留最后名单/T+1毛净收益/已回填不被覆盖/二次回填不重复/旧格式自动收敛/周末顺延/旧表兼容),py_compile过。台账展示区仍按v1.37要求隐藏,T+1汇总走本地命令行查看。前版 v1.53 邮件也显示减持信息:daily_push的build_plan_items批量查近90天减持写入每个item(与web同口径🔴新减持分层),文本版+HTML版两处渲染都接上,失败降级—不影响发信。前版 v1.52 减持标签分层标注:累计比例仍按近90天算,最新一笔公告在近30天内则标🔴新减持、否则普通"减持X%";复用reduce_label_impl已返回的last_date加30天cutoff判定,纯展示不改选股/打分/排序/排雷。前版 v1.51.2 P0修复:c4.metric缺value参数(只传label+help,metric要求label+value)抛TypeError白屏——v1.50引入被v1.51 ImportError挡在前面,止血后暴露;改为metric("本次 / 成本最优","N只 / M只")。AST全扫35处metric参数完整。前版 v1.51.1 P0止血:减持标签改软导入try/except,防增量部署中间态(云端screen_service旧版无此函数)抛ImportError拖垮整页白屏;函数缺失时标签显示—。前版 v1.51 结果表加"股东减持"标签(纯展示):按入选股代码查东财RPT_SHARE_HOLDER_INCREASE近90天减持,用正确字段AFTER_CHANGE_RATE(非报价涨跌幅CHANGE_RATE)聚合累计减持占股本%+笔数,显示"减持X.XX%·N笔"/"—";失败降级—不影响选股。缓存1h。顺带修复screen_service漏import re(_em_news_direct用re.sub却从未导入→NameError被吞→舆情排雷一直静默失效,补import re后恢复)。纯展示不改选股/打分/排序/排雷。前版 v1.50 把成本计算器集成进选股结果区(用户要求"点今日选股后在股票只数这加进去"):删除v1.49独立折叠面板,改为在"今日选出N只"前用本次真实plan逐笔算——4个metric(往返费用/回本涨幅门槛含双边滑点/费用占买入/本次只数vs成本最优只数)+触底佣金告警+「不同只数成本对比」折叠表(按本次均价试算供对照不改方案);卖出费用逐笔按max(5,amt×0.00025)+印花税+过户费算(大额单只更准);纯展示不改选股/打分/精筛/风控。沿用 v1.49 新增「T+1交易成本计算器」折叠面板:输入本金/股价/只数,实时算往返总费用(佣金万2.5最低5元+印花税0.05%卖出+过户费0.001%双向)、回本涨幅门槛(含双边滑点0.1%)、费用占比、成本视角最优只数(单笔≥2万避开5元佣金封底)、多只数对比表;纯本地计算screen_service.cost_calculator无副作用,口径与allocate/best_plan一致,不改选股/打分/精筛/风控。沿用 v1.48 P0修复线上KeyError:REVIEW_CACHE_KEY v1.22→v1.48强制st.cache_data旧复盘缓存失效(旧缓存无「当时盈利概率」列,g[_cols]报错整页白屏)+app展示前兜底缺列补—;沿用 v1.47 邮件历史表现也显示盈利概率:复盘明细/上一次推送卡片的文本版+HTML版四段渲染都补上「当时概率」列(v1.46只加了数据字段没接渲染层,邮件看不到);沿用 v1.46 历史复盘加「当时盈利概率」列:推送留档存下当时的校准盈利概率(web端app.py+邮件端daily_push.py两条路径)+复盘表与盈亏%并排对照,旧批次无留档显示—不编造;沿用 v1.45 价格带严格生效:去掉CSI成分股价格上限豁免(旧逻辑让100~500元高价股也进池)+下限5→8元+页面显示完整区间8~50;沿用 v1.44 改名老王每日选股+v1.43 P0修复(漏import numpy致选股恒空)+v1.42 提速四项+v1.41 舆情直连降级放行+v1.40 去持仓体检+v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
+APP_VERSION = "v1.58"     # v1.58 题材冲刺(高风险·默认关闭·纯展示):用户质疑"没推荐过涨停股、算法没找热点功能吗、用大智慧接口预测未来涨停题材"。查证:①主筛选用screen_impl的mask主动排除涨停票(涨跌幅between(-9,7)+龙虎榜剔除+PE0~80+量比0.5~10+市值30亿~2000亿),是真视通(+7.02%/量比11/PE-73)这类游资票的相反定位,设计使然非漏选;②旧"热点板块塞子"验证Δ+0.036% t=0.10 p=0.918无效;③本次用大智慧板块指数历史K线(之前记的"无历史数据"只对排名接口成立)严格验题材动量:30题材×100交易日Top3次日超额+0.29% t=1.79 p=0.076不显著、Top5/Top8更弱、不覆盖0.4%成本且衰减,题材指数涨≠个股能买进。用户选B=开"题材冲刺"开关:侧栏默认关闭checkbox+结果区独立展示块,放宽涨幅/PE/量比/龙虎榜(允许涨停/亏损/异常放量/游资)但保留非ST+股价8~50+成交额>5000万底线;数据源东财概念板块(fs=m:90+t:3)+成分股(fs=b:BKxxxx)云端直连(大智慧KEY不在仓库、线上拿不到故不用),滤掉"昨日涨停/连板"等技术形态伪题材;软导入+10min缓存+失败降级空表,醒目标注高风险/不参与主打分/不进买入方案/不发邮件。验证:14项断言全过(伪题材滤除/Top3排序/真视通涨停亏损量比11保留/ST超价低成交滤除/per_theme截断/failure降级/脏数据不崩)+py_compile+AST(开关默认False+展示块受sprint_on保护)。前版 v1.57 早班cron提前4小时(北京04:00触发=UTC前一日20:00,0-4;预热03:30=UTC19:30):GitHub免费仓库schedule实测延迟4~5h(近5天早班实际触发11:51~13:35),提前4h让实际到信落08:00~09:00;晚班19:30/20:00不变,周末流水线不变,策略/打分/选股/发信逻辑零改动。前版 v1.56 周末云端流水线(GitHub Actions周六周日09:00):重训模型(用仓库自带training_data/wf_cache_bundle.tar.gz解压→pretrain,IC门控坏模型不覆盖)+跑一次选股写独立周末预测存档.csv(复用daily_push._collect,archive=False不污染推送记录/实盘台账,不联网发邮件,只回填到期台账样本);prediction/train两模式独立降级互不影响;新增weekend_pipeline.py+weekend.yml。策略/打分/排序/选股主流程零改动,不改工作日推送。前版 v1.55 股东减持标签窗口90→60天(用户要求"天数改为60天之内"):screen_service.reduce_label_impl默认lookback_days 90→60,web与邮件都调此函数默认参数故改一处两端同步;🔴新减持30天分层不变(累计比例按60天算,最新公告≤30天标🔴);app caption与daily_push注释文案同步改60天;纯展示口径改动,不改选股/打分/排序/排雷。验证:离线9项断言全过(默认60天filter起始日/60天内聚合/80天前不计/AFTER_CHANGE_RATE字段正确/30天分层/显式覆盖兼容/失败降级—),py_compile过。前版 v1.54 实盘台账改为「股票×交易日」口径:去重键日期+推送时间+代码→日期+代码(一天点多次选股不重复计数,保留最后一次名单且已回填行优先不被抹掉);新增T+1隔夜收益(用户真实打法今收买明收卖)——买入价=推荐日(或之后最近交易日)收盘价(非点击现价,消除盘中多次点击的基准漂移),卖出价=下一交易日收盘,毛收益=卖/买-1,净收益=毛-0.40%往返成本(佣金万2.5双边触底5元+印花0.05%卖出+过户0.001%双边+双边滑点各0.1%的保守估计);新增列T+1买入日/T+1买入价/实际T+1收益%/T+1净收益%,旧表缺列自动补全;周末推送顺延到下一交易日买入;5/10日预测口径不变(基准仍为点击现价);update与record共用_dedup,旧格式同日多批次残留(如迁移前11-18两批)在下次回填时自动收敛到一天一条。纯记账口径改动,不改选股/打分/排序/邮件发信行为(邮件照常每次点都发,按用户选择不动)。验证:离线16项断言全过(同日3次合并/保留最后名单/T+1毛净收益/已回填不被覆盖/二次回填不重复/旧格式自动收敛/周末顺延/旧表兼容),py_compile过。台账展示区仍按v1.37要求隐藏,T+1汇总走本地命令行查看。前版 v1.53 邮件也显示减持信息:daily_push的build_plan_items批量查近90天减持写入每个item(与web同口径🔴新减持分层),文本版+HTML版两处渲染都接上,失败降级—不影响发信。前版 v1.52 减持标签分层标注:累计比例仍按近90天算,最新一笔公告在近30天内则标🔴新减持、否则普通"减持X%";复用reduce_label_impl已返回的last_date加30天cutoff判定,纯展示不改选股/打分/排序/排雷。前版 v1.51.2 P0修复:c4.metric缺value参数(只传label+help,metric要求label+value)抛TypeError白屏——v1.50引入被v1.51 ImportError挡在前面,止血后暴露;改为metric("本次 / 成本最优","N只 / M只")。AST全扫35处metric参数完整。前版 v1.51.1 P0止血:减持标签改软导入try/except,防增量部署中间态(云端screen_service旧版无此函数)抛ImportError拖垮整页白屏;函数缺失时标签显示—。前版 v1.51 结果表加"股东减持"标签(纯展示):按入选股代码查东财RPT_SHARE_HOLDER_INCREASE近90天减持,用正确字段AFTER_CHANGE_RATE(非报价涨跌幅CHANGE_RATE)聚合累计减持占股本%+笔数,显示"减持X.XX%·N笔"/"—";失败降级—不影响选股。缓存1h。顺带修复screen_service漏import re(_em_news_direct用re.sub却从未导入→NameError被吞→舆情排雷一直静默失效,补import re后恢复)。纯展示不改选股/打分/排序/排雷。前版 v1.50 把成本计算器集成进选股结果区(用户要求"点今日选股后在股票只数这加进去"):删除v1.49独立折叠面板,改为在"今日选出N只"前用本次真实plan逐笔算——4个metric(往返费用/回本涨幅门槛含双边滑点/费用占买入/本次只数vs成本最优只数)+触底佣金告警+「不同只数成本对比」折叠表(按本次均价试算供对照不改方案);卖出费用逐笔按max(5,amt×0.00025)+印花税+过户费算(大额单只更准);纯展示不改选股/打分/精筛/风控。沿用 v1.49 新增「T+1交易成本计算器」折叠面板:输入本金/股价/只数,实时算往返总费用(佣金万2.5最低5元+印花税0.05%卖出+过户费0.001%双向)、回本涨幅门槛(含双边滑点0.1%)、费用占比、成本视角最优只数(单笔≥2万避开5元佣金封底)、多只数对比表;纯本地计算screen_service.cost_calculator无副作用,口径与allocate/best_plan一致,不改选股/打分/精筛/风控。沿用 v1.48 P0修复线上KeyError:REVIEW_CACHE_KEY v1.22→v1.48强制st.cache_data旧复盘缓存失效(旧缓存无「当时盈利概率」列,g[_cols]报错整页白屏)+app展示前兜底缺列补—;沿用 v1.47 邮件历史表现也显示盈利概率:复盘明细/上一次推送卡片的文本版+HTML版四段渲染都补上「当时概率」列(v1.46只加了数据字段没接渲染层,邮件看不到);沿用 v1.46 历史复盘加「当时盈利概率」列:推送留档存下当时的校准盈利概率(web端app.py+邮件端daily_push.py两条路径)+复盘表与盈亏%并排对照,旧批次无留档显示—不编造;沿用 v1.45 价格带严格生效:去掉CSI成分股价格上限豁免(旧逻辑让100~500元高价股也进池)+下限5→8元+页面显示完整区间8~50;沿用 v1.44 改名老王每日选股+v1.43 P0修复(漏import numpy致选股恒空)+v1.42 提速四项+v1.41 舆情直连降级放行+v1.40 去持仓体检+v1.39 去资金流对照+v1.38 web提速+v1.37 隐藏台账+v1.36 清v1.24标签+v1.32 T+1精筛+v1.28 全因子+v1.26 复盘净额
 
 st.set_page_config(page_title="老王每日选股", page_icon="📈", layout="centered")
 if _handle_scheduled_action():
@@ -410,7 +418,8 @@ else:
 
 # ---------------- 持仓体检：v1.40 按用户要求从页面隐藏（持仓.csv 与 check_holdings 逻辑保留，本地可查） ----------------
 
-# ---------------- 侧边栏：只保留本金输入（行情/复盘/因子/熔断全部自动） ----------------
+# ---------------- 侧边栏：本金 + 题材冲刺开关（默认关闭，纯展示） ----------------
+sprint_on = False
 with st.sidebar:
     def _on_capital_change():
         """输入框改完自动保存，避免网页和每日邮件各用一套本金"""
@@ -430,6 +439,15 @@ with st.sidebar:
     n_picks = auto_pick_count(capital)
     st.caption(f"只数由本金+预期收益自动计算（当前约 {n_picks} 只起）")
     st.caption(f"行情快照时间：{spot_cache_time()}")
+
+    # v1.58 题材冲刺：默认关闭的高风险展示开关。与主选股完全解耦——
+    # 打开只是在结果页多一块「当日强势题材成分股」，不改打分/排序/名单/邮件。
+    sprint_on = st.checkbox(
+        "🔥 题材冲刺（高风险·默认关）", value=False,
+        help="打开后在选股结果下方单独展示当日 Top3 概念题材的成分股（含涨停/亏损/游资票）。"
+             "纯展示：不参与主打分、不进买入方案、不发邮件。追高风险极大，盈亏自负。")
+    if sprint_on:
+        st.caption("⚠️ 已开启题材冲刺：结果页会追加高波动题材票，仅供你自己判断，系统不为其背书。")
 
     # ---------------- 数据源健康仪表盘 ----------------
     with st.expander("🔧 数据源健康", expanded=False):
@@ -953,6 +971,42 @@ if run:
                "（累计比例按60天算，破折号表示近60天无减持公告或数据未取到），"
                "仅供信息参考、不参与选股与排序；预计盈利/亏损 = 投入 × 该股历史平均每笔盈利率/亏损率（已扣交易成本）；"
                "盈利概率 = 回测胜率经贝叶斯收缩后的校准值（样本少时向50%收敛）。均为历史统计推算，不代表未来，不构成投资建议。")
+
+    # ---- v1.58 题材冲刺：默认关闭、纯展示，不参与主打分/买入方案/邮件 ----
+    if sprint_on:
+        st.markdown("---")
+        st.subheader("🔥 题材冲刺 · 当日强势题材成分股（高风险）")
+        st.error(
+            "⚠️ 以下是被主策略**主动排除**的高波动票（涨停/亏损/异常放量/游资票）。"
+            "本模块只是把当日最强题材的成分股摆出来供你自己判断，**不参与打分、不进买入方案、不进邮件**。"
+            "严格验证：题材动量次日超额仅 +0.29%（p=0.076，不显著，且覆盖不了 0.4% 往返成本）。"
+            "追高极易吃面，盈亏自负。"
+        )
+        try:
+            _sprint_df = theme_sprint()
+            if _sprint_df is None or len(_sprint_df) == 0:
+                st.info("题材数据暂不可用，或当前无符合价格/成交额底线的题材票"
+                        "（接口限流或非交易时段常见），不影响上方主结果。")
+            else:
+                st.dataframe(
+                    _sprint_df, width="stretch", hide_index=True,
+                    column_config={
+                        "现价": st.column_config.NumberColumn(format="%.2f"),
+                        "题材涨幅%": st.column_config.NumberColumn(format="%+.2f%%"),
+                        "涨幅%": st.column_config.NumberColumn(format="%+.2f%%"),
+                        "换手%": st.column_config.NumberColumn(format="%.2f%%"),
+                        "量比": st.column_config.NumberColumn(format="%.2f"),
+                        "市值(亿)": st.column_config.NumberColumn(format="%.1f"),
+                        "主力净流入(万)": st.column_config.NumberColumn(format="%+.0f"),
+                    },
+                )
+                st.caption("口径：东财概念板块当日涨幅 Top3（已剔除「昨日涨停/连板」等技术形态标签），"
+                           "每题材取涨幅前 6 只；刻意放宽了涨幅/市盈率/量比/龙虎榜过滤，"
+                           "仅保留非ST、股价 8~50 元、成交额>5000 万三条底线。"
+                           "数据为盘中实时截面，不是预测；不构成投资建议。")
+        except Exception as _e:
+            st.info(f"题材数据拉取失败（{str(_e)[:60]}），已降级跳过，不影响上方主结果。")
+        st.markdown("---")
 
     # ---- 粗筛候选池导出：全部候选(含技术因子值 + v1.29当日快照字段)导出，供 refine_pool.py 精筛 ----
     with st.expander("📦 导出粗筛候选池（给外部模型精筛用）", expanded=False):
