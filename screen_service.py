@@ -1722,3 +1722,66 @@ def external_context_impl(review_dates: list) -> dict:
         if item:
             result[d] = item
     return result
+
+
+# ==================== v1.61 标题区累计净值曲线（纯展示·首屏自动加载） ====================
+# 用户选"首屏自动加载+诚实展示"：把实盘逐笔盈亏累加成一条资金曲线放标题旁。
+# 数据来自 review_impl 的复盘结果（已联网算好的逐笔扣费净额），本函数只做本地聚合，
+# 不额外联网。app 端用 _run_with_timeout 包裹 + 失败降级，绝不让曲线拖垮首屏白屏。
+
+def equity_curve_impl(rv) -> dict:
+    """把复盘结果累加成累计净值曲线（元），供标题区展示。纯本地计算，无网络。
+
+    参数 rv: review_impl/review_performance 返回的 DataFrame，需含列
+             _batch(批次键), 日期, _done, _盈亏额(扣费后净额)。
+    返回 dict:
+      ok        bool  是否有可画的已结算数据
+      curve     list  [(日期标签, 累计盈亏元), ...] 按日期正序（含起点0）
+      total     最终累计盈亏(元)
+      n         已结算笔数
+      win_rate  胜率%(按每笔净额>0)
+      avg       平均每笔净盈亏(元)
+      note      一句话说明
+    口径：按推荐批次(日期+推送时间)推进，每批内已结算笔净额求和，逐批累加；
+          ⏳持有中(_done=False)不计入。累计为0轴起步的"逐笔到手净额"曲线。
+    任何异常返回 ok=False 的空结构，调用方安静降级。
+    """
+    empty = {"ok": False, "curve": [], "total": 0.0, "n": 0,
+             "win_rate": 0.0, "avg": 0.0, "note": "暂无已结算数据"}
+    try:
+        import pandas as _pd
+        if rv is None or not hasattr(rv, "columns") or len(rv) == 0:
+            return empty
+        need = {"_batch", "日期", "_done", "_盈亏额"}
+        if not need.issubset(rv.columns):
+            return empty
+        d = rv[rv["_done"]].copy()
+        if len(d) == 0:
+            return empty
+        d["_盈亏额"] = _pd.to_numeric(d["_盈亏额"], errors="coerce").fillna(0.0)
+        # 按批次聚合：同一次推送的多笔合成一个点（日期用批次里的日期）
+        g = (d.groupby("_batch", sort=False)
+               .agg(日期=("日期", "first"), 批盈亏=("_盈亏额", "sum"), 笔数=("_盈亏额", "size"))
+               .reset_index())
+        g["_dt"] = _pd.to_datetime(g["日期"], errors="coerce")
+        g = g.dropna(subset=["_dt"]).sort_values("_dt", kind="stable")
+        if len(g) == 0:
+            return empty
+        cum = g["批盈亏"].cumsum().round(2).tolist()
+        # 同日多批加 #序号 后缀，避免重复横轴标签（st.line_chart 按标签画点）
+        _seen = {}
+        labels = []
+        for x in g["日期"].tolist():
+            _d = str(x)[:10]
+            _seen[_d] = _seen.get(_d, 0) + 1
+            labels.append(_d if _seen[_d] == 1 else f"{_d}#{_seen[_d]}")
+        curve = [("起点", 0.0)] + list(zip(labels, cum))
+        n = int(len(d))
+        total = round(float(cum[-1]), 2)
+        wins = int((d["_盈亏额"] > 0).sum())
+        return {"ok": True, "curve": curve, "total": total, "n": n,
+                "win_rate": round(100.0 * wins / n, 1) if n else 0.0,
+                "avg": round(float(d["_盈亏额"].mean()), 2) if n else 0.0,
+                "note": f"{n} 笔已结算逐笔累计（扣费后）"}
+    except Exception:
+        return empty
