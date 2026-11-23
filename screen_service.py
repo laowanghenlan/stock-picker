@@ -1611,3 +1611,83 @@ def allocate(picks: pd.DataFrame, budget0: float,
         df.attrs["risk_info"] = risk_info
     leftover = round(budget, 2)
     return df, leftover
+
+
+# ==================== v1.59 复盘区外盘背景（纯展示·事后解释，不参与打分/邮件） ====================
+# 定位：外盘是"解释工具"不是"预测工具"。已用126个交易日验证：隔夜纳指→沪深300当日
+# 相关系数仅0.199、样本外衰减到0.131、分组单调性断裂、加筛子只改善0.017%/天(噪声级)，
+# 故绝不进打分/排序/买入方案/邮件，只在复盘区显示当日外盘环境，帮用户理解"这批为何亏"。
+
+# 东财全球指数 secid：纳斯达克100=100.NDX、标普500=100.SPX、日经225=100.N225、韩国KOSPI=100.KS11
+_EM_GLOBAL = {
+    "纳指": "100.NDX",
+    "标普": "100.SPX",
+    "日经": "100.N225",
+    "韩股": "100.KS11",
+}
+
+
+def _em_index_kline(secid: str, limit: int = 200) -> dict:
+    """拉单个东财全球指数日线，返回 {date: close}。失败返回空 dict（静默降级）。"""
+    try:
+        r = requests.get(
+            "https://push2his.eastmoney.com/api/qt/stock/kline/get",
+            params={"secid": secid, "klt": 101, "fqt": 1, "lmt": limit,
+                    "fields1": "f1,f2,f3", "fields2": "f51,f53", "end": "20500101"},
+            headers={"User-Agent": "Mozilla/5.0"}, timeout=12)
+        j = r.json()
+        rows = (j.get("data") or {}).get("klines") or []
+        out = {}
+        for line in rows:
+            d, c = line.split(",")[:2]
+            try:
+                out[d] = float(c)
+            except ValueError:
+                continue
+        return out
+    except Exception:
+        return {}
+
+
+def external_context_impl(review_dates: list) -> dict:
+    """给复盘区的每个'推荐日'算隔夜/当日外盘背景（纯展示）。
+
+    review_dates: 复盘表里的推荐日期字符串列表（如 ['2026-11-18', ...]）。
+    返回: {推荐日: {"纳指": +x.x, "标普": +x.x, "日经": +x.x, "韩股": +x.x,
+                   "外盘日": "YYYY-MM-DD"}}；涨跌幅单位%，失败项缺省。
+    口径：对每个推荐日 D，取美股/外盘在 D 之前最近一个交易日的收益（=A股D日开盘前
+    能看到的外盘表现，即"隔夜外盘"）。东财接口偶发失败则该项留空，不影响其它项。
+    """
+    result = {}
+    try:
+        dates = sorted({str(d).strip()[:10] for d in review_dates if d})
+    except Exception:
+        return {}
+    if not dates:
+        return {}
+    # 一次性拉四个指数的日线，之后本地匹配，避免逐日联网
+    series = {name: _em_index_kline(secid) for name, secid in _EM_GLOBAL.items()}
+    if not any(series.values()):
+        return {}
+    for d in dates:
+        item = {}
+        for name, smap in series.items():
+            if not smap:
+                continue
+            prev = [k for k in smap if k < d]
+            if len(prev) < 1:
+                continue
+            pd_ = prev[-1]
+            # 收益 = 前一交易日收盘 / 更早一交易日收盘 - 1
+            idx = sorted(smap).index(pd_)
+            earlier = sorted(smap)[idx - 1] if idx >= 1 else None
+            if earlier is None:
+                continue
+            try:
+                item[name] = round((smap[pd_] / smap[earlier] - 1) * 100, 2)
+                item["外盘日"] = pd_
+            except (ValueError, ZeroDivisionError):
+                continue
+        if item:
+            result[d] = item
+    return result
