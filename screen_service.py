@@ -1785,3 +1785,72 @@ def equity_curve_impl(rv) -> dict:
                 "note": f"{n} 笔已结算逐笔累计（扣费后）"}
     except Exception:
         return empty
+
+
+# ==================== v1.62 标题区净值曲线图标（替代 📈 emoji，纯展示） ====================
+# 用户不满标题里的静态 emoji 蓝色线条，要求用真实净值曲线做"动态图片"取代。
+# emoji 内部线条是字体渲染、无法单独替换；改用 numpy 把真实累计净值画成一张迷你图标，
+# 数据变则图标变（st.cache_data 跟随数据刷新）。零新增依赖：Streamlit 原生支持 ndarray
+# 作为图片；不引入 PIL/matplotlib（requirements 里没有，云端不稳）。失败返回 None 降级回 emoji。
+
+def equity_spark_icon(eq: dict, w: int = 160, h: int = 72, scale: int = 3):
+    """把累计净值曲线画成一张 RGB 图标数组 (h, w, 3) uint8，供 st.image 直接显示。
+
+    eq: equity_curve_impl 的返回 dict（含 curve=[(标签, 累计元), ...]）。
+    纯 numpy + 4x 超采样降采样做抗锯齿；浅灰底 + 零轴虚线；涨红跌绿（A股习惯）。
+    数据不足/异常返回 None，调用方降级回原 📈 emoji，绝不留空白。
+    """
+    try:
+        import numpy as np
+        curve = (eq or {}).get("curve") or []
+        vals = []
+        for _, v in curve:
+            try:
+                vals.append(float(v))
+            except (TypeError, ValueError):
+                continue
+        if len(vals) < 2:
+            return None
+        W, H = int(w * scale), int(h * scale)
+        img = np.full((H, W, 3), 248, dtype=np.float32)   # 浅灰底（适配浅色主题）
+        lo, hi = min(vals + [0.0]), max(vals + [0.0])
+        rng = (hi - lo) or 1.0
+        pad_x, pad_y = 3 * scale, 5 * scale
+        n = len(vals)
+        pts = []
+        for i, v in enumerate(vals):
+            x = int(round(pad_x + (i / (n - 1)) * (W - 2 * pad_x - 1)))
+            y = int(round((H - pad_y) - (v - lo) / rng * (H - 2 * pad_y)))
+            pts.append((x, y))
+        up = vals[-1] >= 0
+        color = np.array((219, 40, 40) if up else (22, 140, 75), dtype=np.float32)  # 涨红/跌绿
+        fill = np.array((250, 232, 232) if up else (228, 244, 234), dtype=np.float32)
+        # 零轴虚线
+        y0 = int(round((H - pad_y) - (0.0 - lo) / rng * (H - 2 * pad_y)))
+        for x in range(0, W, 2 * scale):
+            img[max(0, min(H - 1, y0)), x:min(W, x + scale)] = 190
+        # 折线下方浅色填充（逐段插值，逐列填到零轴）
+        for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+            steps = max(abs(x2 - x1), abs(y2 - y1), 1)
+            for t in range(steps + 1):
+                x = int(round(x1 + (x2 - x1) * t / steps))
+                y = int(round(y1 + (y2 - y1) * t / steps))
+                if 0 <= x < W:
+                    a, b = sorted((max(0, min(H - 1, y)), max(0, min(H - 1, y0))))
+                    img[a:b + 1, x] = fill
+        # 折线本体（圆头描边）
+        rad = max(1, scale)
+        for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+            steps = max(abs(x2 - x1), abs(y2 - y1), 1)
+            for t in range(steps + 1):
+                x = int(round(x1 + (x2 - x1) * t / steps))
+                y = int(round(y1 + (y2 - y1) * t / steps))
+                for dy in range(-rad, rad + 1):
+                    for dx in range(-rad, rad + 1):
+                        if dx * dx + dy * dy <= rad * rad and 0 <= x + dx < W and 0 <= y + dy < H:
+                            img[y + dy, x + dx] = color
+        # 4x 降采样抗锯齿
+        out = img.reshape(h, scale, w, scale, 3).mean(axis=(1, 3))
+        return np.clip(out, 0, 255).astype(np.uint8)
+    except Exception:
+        return None
