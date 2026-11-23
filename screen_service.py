@@ -1854,3 +1854,59 @@ def equity_spark_icon(eq: dict, w: int = 160, h: int = 72, scale: int = 3):
         return np.clip(out, 0, 255).astype(np.uint8)
     except Exception:
         return None
+
+
+# ==================== v1.63 标题区专业坐标轴净值图（替代 v1.62 numpy 迷你图） ====================
+# 用户："左上角动态曲线 x/y 轴坐标加专业一点，右边曲线去掉"。numpy 图片无法渲染文字刻度，
+# 改用 plotly（requirements 已有 plotly==7.1.0，云端必然可用）画带完整坐标轴的交互图：
+# x=推荐批次日期、y=累计盈亏(元)、零线+网格、hover 看每笔累计、涨红跌绿。失败返回 None 降级。
+
+def equity_figure_impl(eq: dict):
+    """用 plotly 画带专业 x/y 坐标轴的累计盈亏图，供 st.plotly_chart 显示。
+
+    eq: equity_curve_impl 的返回 dict（含 curve=[(标签, 累计元), ...]）。
+    返回 plotly.graph_objects.Figure；数据不足/异常返回 None（调用方安静降级）。
+    """
+    try:
+        import plotly.graph_objects as go
+        curve = (eq or {}).get("curve") or []
+        labels, vals = [], []
+        for lab, v in curve:
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            labels.append(str(lab))
+            vals.append(fv)
+        if len(vals) < 2:
+            return None
+        up = vals[-1] >= 0
+        line_color = "#d62728" if up else "#2ca02c"          # A股习惯：涨红跌绿
+        fill_color = "rgba(214,39,40,0.12)" if up else "rgba(44,160,44,0.12)"
+        total = vals[-1]
+        sign = "+" if total > 0 else ""
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=labels, y=vals, mode="lines+markers", name="累计盈亏",
+            line=dict(color=line_color, width=2.5),
+            marker=dict(size=6, color=line_color, line=dict(color="#ffffff", width=1)),
+            fill="tozeroy", fillcolor=fill_color,
+            hovertemplate="%{x}<br>累计 %{y:+,.0f} 元<extra></extra>",
+        ))
+        fig.update_layout(
+            title=dict(text=f"实盘累计盈亏 · {sign}{total:,.0f} 元", x=0.02,
+                       font=dict(size=14)),
+            xaxis_title="推荐批次", yaxis_title="累计盈亏（元）",
+            height=250, showlegend=False,
+            margin=dict(l=64, r=16, t=42, b=40),
+            hovermode="x unified",
+            plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
+            font=dict(color="#333333", size=11),
+        )
+        fig.update_xaxes(showgrid=True, gridcolor="#eef0f2", zeroline=False)
+        fig.update_yaxes(showgrid=True, gridcolor="#eef0f2",
+                         zeroline=True, zerolinecolor="#b9bec6", zerolinewidth=1,
+                         tickformat=",.0f")
+        return fig
+    except Exception:
+        return None
