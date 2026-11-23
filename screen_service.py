@@ -487,6 +487,23 @@ def _kelly_position(ranked: pd.DataFrame, capital: float,
         return pd.Series(1.0, index=ranked.index)
 
 
+def dedup_by_industry(ranked: pd.DataFrame) -> pd.DataFrame:
+    """v1.60 行业硬分散：每个行业只保留排名最高的1只（按传入顺序 keep first）。
+    只用于 best_plan 构造买入方案，不改页面候选池/打分/排序。异常时原样返回。"""
+    try:
+        if "行业" not in ranked.columns or len(ranked) == 0:
+            return ranked
+        _attrs = dict(ranked.attrs)
+        d = ranked.copy()
+        d["_行业键"] = d["行业"].astype(str)
+        out = d.drop_duplicates(subset=["_行业键"], keep="first").drop(columns=["_行业键"])
+        for _k, _v in _attrs.items():
+            out.attrs[_k] = _v
+        return out
+    except Exception:
+        return ranked
+
+
 def best_plan(ranked: pd.DataFrame, capital: float):
     """只数不写死：枚举 1~min(候选数,20)，选'预期总收益−买卖全部摩擦成本'最大的方案。
     预期收益 = 各票扣费回测收益% × 实际买入金额；摩擦含最低5元佣金
@@ -494,6 +511,16 @@ def best_plan(ranked: pd.DataFrame, capital: float):
     v1.8: 从 ranked.attrs 取 n_done / hists，传给 allocate 做均值方差优化。
     v1.24: 加空 plan 守卫，allocate 全部候选买不起 1 手时返回空 df → 跳过。
     返回 (买入方案, 最优只数)。"""
+    # v1.60 行业硬分散（取长补短·对标 AlphaSift 行业桶上限）：
+    # 买入方案里每个行业只保留排名最高的1只。全样本验证同行业日收益相关0.483 vs
+    # 跨行业0.215，硬分散使组合日波动降6.5%、尾部P5收窄、收益不变(+1.4bp p=0.83)。
+    # 只改进入方案的候选列表，不改 ranked 本身（页面候选池/打分/排序照旧），
+    # 且 web 与邮件都走 best_plan，一处改动两端同步。配置 false 可回退。
+    try:
+        if _cfg().get("仓位管理", {}).get("组合风控", {}).get("每行业最多1只", True):
+            ranked = dedup_by_industry(ranked)
+    except Exception:
+        pass   # 去重任何异常都降级回原行为，绝不因它选不出票
     ret_map = ranked.set_index("代码")["扣费总收益"]
     n_done = int(ranked.attrs.get("n_done", 0) or 0)
     hists = ranked.attrs.get("hists") or {}
@@ -852,6 +879,10 @@ def review_impl(_key: str = "") -> pd.DataFrame:
                "盈亏%": net_pct,                                     # 净收益率（对实际到手金额）
                "结果": label,
                "同期沪深300%": bench,
+               # v1.60 超额% = 净收益 − 同期沪深300，纯展示：把"赚亏"正确归因成"选股 vs 大盘"。
+               # 基准缺失留空（不编造）；持有中/当日新推也留空（未了结不比较）。
+               "超额%": (round(net_pct - bench, 2)
+                       if bench is not None and not label.startswith("⏳") else None),
                "盈亏额": net_pnl,
                # v1.46 当时的盈利概率：推荐时留档的校准值；旧批次无此列显示"—"，无法回溯，不编造
                "当时盈利概率": ("—" if pd.isna(r.get("盈利概率")) or r.get("盈利概率") is None
