@@ -1856,6 +1856,35 @@ def equity_spark_icon(eq: dict, w: int = 160, h: int = 72, scale: int = 3):
         return None
 
 
+def equity_spark_data_url(eq: dict):
+    """把 equity_spark_icon 产出的 RGB ndarray 编码成 PNG data URL（纯标准库，无 PIL）。
+
+    供 app.py 把迷你图内联进带边框的 HTML 容器，实现"图标带框 + 与标题同排居中对齐"。
+    手写 PNG（IHDR/IDAT/IEND + zlib + crc32），零新增依赖；失败返回 None 由调用方降级。
+    """
+    try:
+        import base64 as _b64
+        import struct as _struct
+        import zlib as _zlib
+        img = equity_spark_icon(eq)
+        if img is None:
+            return None
+        h, w = int(img.shape[0]), int(img.shape[1])
+
+        def _chunk(tag, data):
+            return (_struct.pack(">I", len(data)) + tag + data
+                    + _struct.pack(">I", _zlib.crc32(tag + data) & 0xffffffff))
+
+        raw = b"".join(b"\x00" + img[y].tobytes() for y in range(h))  # 每行 filter=0
+        png = (b"\x89PNG\r\n\x1a\n"
+               + _chunk(b"IHDR", _struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+               + _chunk(b"IDAT", _zlib.compress(raw, 9))
+               + _chunk(b"IEND", b""))
+        return "data:image/png;base64," + _b64.b64encode(png).decode("ascii")
+    except Exception:
+        return None
+
+
 # ==================== v1.63 标题区专业坐标轴净值图（替代 v1.62 numpy 迷你图） ====================
 # 用户："左上角动态曲线 x/y 轴坐标加专业一点，右边曲线去掉"。numpy 图片无法渲染文字刻度，
 # 改用 plotly（requirements 已有 plotly==7.1.0，云端必然可用）画带完整坐标轴的交互图：
